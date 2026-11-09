@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../services/api';
-import { CastScript, Episode, PipelineEvent, Series } from '../types';
+import { CastScript, Episode, PipelineEvent, Series, TimelineEntry } from '../types';
 import {
   ArrowLeft,
   Play,
+  Pause,
   RotateCw,
   CheckCircle2,
   Volume2,
@@ -15,6 +16,10 @@ import {
   Activity,
   Layers,
   Loader2,
+  Edit3,
+  Check,
+  X,
+  Headphones,
 } from 'lucide-react';
 
 const PIPELINE_NODES = [
@@ -33,11 +38,25 @@ export const EpisodeStudio: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'script' | 'cast' | 'outline' | 'logs'>('script');
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [isSynthesizingAudio, setIsSynthesizingAudio] = useState(false);
   const [currentNode, setCurrentNode] = useState<string | null>(null);
   const [completedNodes, setCompletedNodes] = useState<string[]>([]);
   const [eventsLog, setEventsLog] = useState<PipelineEvent[]>([]);
   const [revisionCount, setRevisionCount] = useState(0);
-  const eventSourceRef = useRef<EventSource | null>(null);
+
+  // Audio Playback State
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [audioTimestamp, setAudioTimestamp] = useState(Date.now());
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+
+  // Per-Line Editing & Regeneration State
+  const [editingLineId, setEditingLineId] = useState<string | null>(null);
+  const [editText, setEditText] = useState('');
+  const [editEmotion, setEditEmotion] = useState('neutral');
+  const [editVoiceId, setEditVoiceId] = useState('');
+  const [regeneratingLineId, setRegeneratingLineId] = useState<string | null>(null);
 
   const fetchEpisodeData = async () => {
     if (!id) return;
@@ -64,7 +83,6 @@ export const EpisodeStudio: React.FC = () => {
     if (!id) return;
     const sseUrl = api.getEpisodeEventsUrl(id);
     const es = new EventSource(sseUrl);
-    eventSourceRef.current = es;
 
     es.onmessage = (event) => {
       try {
@@ -83,15 +101,18 @@ export const EpisodeStudio: React.FC = () => {
           setRevisionCount((prev) => prev + 1);
         }
 
-        if (parsed.event_type === 'pipeline_completed') {
+        if (parsed.event_type === 'pipeline_completed' || parsed.event_type === 'audio_generation_completed') {
           setIsGenerating(false);
+          setIsSynthesizingAudio(false);
           setCurrentNode(null);
           setCompletedNodes(PIPELINE_NODES.map((n) => n.id));
-          fetchEpisodeData(); // Refresh script data
+          setAudioTimestamp(Date.now());
+          fetchEpisodeData();
         }
 
         if (parsed.event_type === 'pipeline_failed') {
           setIsGenerating(false);
+          setIsSynthesizingAudio(false);
           setCurrentNode(null);
           fetchEpisodeData();
         }
@@ -119,6 +140,62 @@ export const EpisodeStudio: React.FC = () => {
     }
   };
 
+  const handleSynthesizeAllAudio = async () => {
+    if (!id) return;
+    setIsSynthesizingAudio(true);
+    try {
+      await api.generateEpisodeAudio(id);
+      setAudioTimestamp(Date.now());
+      await fetchEpisodeData();
+    } catch {
+      alert('Failed to generate episode audio.');
+    } finally {
+      setIsSynthesizingAudio(false);
+    }
+  };
+
+  const handleStartLineEdit = (line: any) => {
+    setEditingLineId(line.id);
+    setEditText(line.text_localized || line.text);
+    setEditEmotion(line.emotion || 'neutral');
+    setEditVoiceId(line.voice_id || '');
+  };
+
+  const handleSaveAndRegenerateLine = async (lineId: string) => {
+    if (!id) return;
+    setRegeneratingLineId(lineId);
+    try {
+      await api.regenerateLineAudio(id, lineId, {
+        text: editText,
+        emotion: editEmotion,
+        voice_id: editVoiceId || undefined,
+      });
+      setEditingLineId(null);
+      setAudioTimestamp(Date.now());
+      await fetchEpisodeData();
+    } catch {
+      alert('Failed to regenerate line audio.');
+    } finally {
+      setRegeneratingLineId(null);
+    }
+  };
+
+  const togglePlayback = () => {
+    if (!audioRef.current) return;
+    if (isPlaying) {
+      audioRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
+    }
+  };
+
+  const seekToLine = (startSeconds: number) => {
+    if (!audioRef.current) return;
+    audioRef.current.currentTime = startSeconds;
+    audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+  };
+
   if (isLoading) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center text-slate-400">
@@ -137,9 +214,27 @@ export const EpisodeStudio: React.FC = () => {
   }
 
   const castScript = episode.script as CastScript | undefined;
+  const timeline: TimelineEntry[] = castScript?.timeline || [];
+
+  // Determine active line currently being spoken during playback
+  const activeTimelineEntry = timeline.find(
+    (t) => currentTime >= t.start_seconds && currentTime <= t.end_seconds
+  );
+  const activeLineId = activeTimelineEntry?.line_id;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col pb-24">
+      {/* Hidden Audio Player Element */}
+      {episode.audio_url && (
+        <audio
+          ref={audioRef}
+          src={`${api.getAudioUrl(episode.id)}?t=${audioTimestamp}`}
+          onTimeUpdate={(e) => setCurrentTime(e.currentTarget.currentTime)}
+          onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
+          onEnded={() => setIsPlaying(false)}
+        />
+      )}
+
       {/* Top Studio Header */}
       <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur-md sticky top-0 z-40">
         <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
@@ -166,9 +261,30 @@ export const EpisodeStudio: React.FC = () => {
             <span className="px-2.5 py-1 text-xs rounded-lg font-mono bg-slate-800 text-slate-300 border border-slate-700 capitalize">
               {episode.target_language}
             </span>
+
+            {castScript && (
+              <button
+                onClick={handleSynthesizeAllAudio}
+                disabled={isSynthesizingAudio || isGenerating}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-emerald-500 hover:bg-emerald-400 text-slate-950 transition-all shadow-md shadow-emerald-500/20 disabled:opacity-50"
+              >
+                {isSynthesizingAudio ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Stitching Audio Track...
+                  </>
+                ) : (
+                  <>
+                    <Volume2 className="w-3.5 h-3.5" />
+                    {episode.audio_url ? 'Re-Synthesize Master' : 'Synthesize Audio Track'}
+                  </>
+                )}
+              </button>
+            )}
+
             <button
               onClick={handleStartGeneration}
-              disabled={isGenerating}
+              disabled={isGenerating || isSynthesizingAudio}
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-all shadow-md shadow-amber-500/20 disabled:opacity-50"
             >
               {isGenerating ? (
@@ -284,7 +400,7 @@ export const EpisodeStudio: React.FC = () => {
           </button>
         </div>
 
-        {/* Tab Content: Localized Script */}
+        {/* Tab Content: Localized Script with Per-Line Regeneration */}
         {activeTab === 'script' && (
           <div className="space-y-6">
             {!castScript ? (
@@ -320,40 +436,123 @@ export const EpisodeStudio: React.FC = () => {
                     </div>
 
                     <div className="space-y-3">
-                      {scene.lines.map((line) => (
-                        <div
-                          key={line.id}
-                          className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800/60 flex items-start gap-3 hover:border-slate-700 transition-colors"
-                        >
-                          <div className="w-24 shrink-0">
-                            <span className="font-semibold text-white text-xs block truncate">
-                              {line.character_name}
-                            </span>
-                            {line.voice_id && (
-                              <span className="text-[10px] text-amber-400/80 font-mono block truncate">
-                                {line.voice_id}
-                              </span>
+                      {scene.lines.map((line) => {
+                        const isSpeaking = activeLineId === line.id;
+                        const isEditing = editingLineId === line.id;
+                        const isRegen = regeneratingLineId === line.id;
+                        const lineTimeline = timeline.find((t) => t.line_id === line.id);
+
+                        return (
+                          <div
+                            key={line.id}
+                            className={`p-4 rounded-xl border transition-all ${
+                              isSpeaking
+                                ? 'bg-amber-500/15 border-amber-500 shadow-md shadow-amber-500/10 ring-1 ring-amber-500/50'
+                                : 'bg-slate-950/80 border-slate-800/70 hover:border-slate-700'
+                            }`}
+                          >
+                            {isEditing ? (
+                              <div className="space-y-3">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-xs font-bold text-amber-400">
+                                    Editing Line #{line.line_number} — {line.character_name}
+                                  </span>
+                                  <button
+                                    onClick={() => setEditingLineId(null)}
+                                    className="text-slate-500 hover:text-white"
+                                  >
+                                    <X className="w-4 h-4" />
+                                  </button>
+                                </div>
+
+                                <textarea
+                                  rows={2}
+                                  value={editText}
+                                  onChange={(e) => setEditText(e.target.value)}
+                                  className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-white focus:outline-none focus:border-amber-500"
+                                />
+
+                                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                                  <div className="flex items-center gap-2">
+                                    <label className="text-xs text-slate-400">Emotion:</label>
+                                    <input
+                                      type="text"
+                                      value={editEmotion}
+                                      onChange={(e) => setEditEmotion(e.target.value)}
+                                      className="px-2 py-1 text-xs bg-slate-900 border border-slate-700 rounded text-slate-200"
+                                    />
+                                  </div>
+
+                                  <button
+                                    onClick={() => handleSaveAndRegenerateLine(line.id)}
+                                    disabled={isRegen}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 disabled:opacity-50"
+                                  >
+                                    {isRegen ? (
+                                      <>
+                                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                        Re-synthesizing...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Check className="w-3.5 h-3.5" />
+                                        Save & Regenerate Audio
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex items-start gap-4">
+                                <div className="w-28 shrink-0">
+                                  <span className="font-semibold text-white text-xs block truncate">
+                                    {line.character_name}
+                                  </span>
+                                  {line.voice_id && (
+                                    <span className="text-[10px] text-amber-400/80 font-mono block truncate">
+                                      {line.voice_id}
+                                    </span>
+                                  )}
+                                  {lineTimeline && (
+                                    <button
+                                      onClick={() => seekToLine(lineTimeline.start_seconds)}
+                                      className="text-[10px] text-slate-500 hover:text-amber-400 font-mono flex items-center gap-1 mt-1 transition-colors"
+                                      title="Jump to this line in audio"
+                                    >
+                                      <Play className="w-2.5 h-2.5 fill-current" />
+                                      {lineTimeline.start_seconds.toFixed(1)}s
+                                    </button>
+                                  )}
+                                </div>
+
+                                <div className="flex-1 space-y-1">
+                                  <p className="text-sm text-slate-200 leading-relaxed">
+                                    {line.text_localized}
+                                  </p>
+                                  {line.dialect_notes && (
+                                    <p className="text-[11px] text-slate-500 italic">
+                                      {line.dialect_notes}
+                                    </p>
+                                  )}
+                                </div>
+
+                                <div className="shrink-0 flex items-center gap-2">
+                                  <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] capitalize text-slate-400">
+                                    {line.emotion || 'neutral'}
+                                  </span>
+                                  <button
+                                    onClick={() => handleStartLineEdit(line)}
+                                    title="Edit and regenerate this dialogue line"
+                                    className="p-1.5 text-slate-500 hover:text-amber-400 hover:bg-slate-900 rounded-lg transition-colors"
+                                  >
+                                    <Edit3 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
                             )}
                           </div>
-
-                          <div className="flex-1 space-y-1">
-                            <p className="text-sm text-slate-200 leading-relaxed">
-                              {line.text_localized}
-                            </p>
-                            {line.dialect_notes && (
-                              <p className="text-[11px] text-slate-500 italic">
-                                Note: {line.dialect_notes}
-                              </p>
-                            )}
-                          </div>
-
-                          <div className="shrink-0 flex items-center gap-1.5 text-xs text-slate-500">
-                            <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] capitalize">
-                              {line.emotion || 'neutral'}
-                            </span>
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   </div>
                 ))}
@@ -452,6 +651,55 @@ export const EpisodeStudio: React.FC = () => {
           </div>
         )}
       </main>
+
+      {/* Floating Audio Playback Controller */}
+      {episode.audio_url && (
+        <div className="fixed bottom-0 left-0 right-0 bg-slate-900/95 border-t border-slate-800 backdrop-blur-xl px-4 py-3 z-50">
+          <div className="max-w-7xl mx-auto flex items-center justify-between gap-6">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={togglePlayback}
+                className="w-10 h-10 rounded-full bg-amber-500 hover:bg-amber-400 text-slate-950 flex items-center justify-center transition-all shadow-md shadow-amber-500/20"
+              >
+                {isPlaying ? <Pause className="w-5 h-5 fill-current" /> : <Play className="w-5 h-5 fill-current ml-0.5" />}
+              </button>
+              <div>
+                <p className="text-xs font-bold text-white line-clamp-1">{episode.title}</p>
+                <p className="text-[11px] text-amber-400 font-mono">
+                  {activeTimelineEntry ? `Now Speaking: ${activeTimelineEntry.character_name}` : 'Episode Master Audio'}
+                </p>
+              </div>
+            </div>
+
+            {/* Seek Bar & Timers */}
+            <div className="flex-1 max-w-xl flex items-center gap-3">
+              <span className="text-[11px] font-mono text-slate-400 w-10 text-right">
+                {Math.floor(currentTime / 60)}:{(Math.floor(currentTime % 60)).toString().padStart(2, '0')}
+              </span>
+              <input
+                type="range"
+                min={0}
+                max={duration || 100}
+                value={currentTime}
+                onChange={(e) => {
+                  if (audioRef.current) {
+                    audioRef.current.currentTime = parseFloat(e.target.value);
+                  }
+                }}
+                className="w-full h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-amber-500"
+              />
+              <span className="text-[11px] font-mono text-slate-400 w-10">
+                {Math.floor(duration / 60)}:{(Math.floor(duration % 60)).toString().padStart(2, '0')}
+              </span>
+            </div>
+
+            <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400">
+              <Headphones className="w-4 h-4 text-amber-400" />
+              <span>Broadcast Normalization</span>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

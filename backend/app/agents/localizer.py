@@ -108,3 +108,4 @@ async def localizer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict
             "current_node": "localizer",
             "errors": [GraphErrorRecord(node="localizer", error=str(exc), timestamp=datetime.now(timezone.utc).isoformat(), recoverable=False)],
         }
+

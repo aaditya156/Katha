@@ -110,6 +110,31 @@ class ApiClient {
     );
   }
 
+  async generateEpisodeAudio(episodeId: string): Promise<{ status: string; audio_url: string }> {
+    return this.request<{ status: string; audio_url: string }>(
+      `/episodes/${episodeId}/audio/generate`,
+      { method: 'POST' }
+    );
+  }
+
+  async regenerateLineAudio(
+    episodeId: string,
+    lineId: string,
+    updates?: { text?: string; emotion?: string; voice_id?: string }
+  ): Promise<{ status: string; line_id: string; audio_url: string }> {
+    return this.request<{ status: string; line_id: string; audio_url: string }>(
+      `/episodes/${episodeId}/lines/${lineId}/regenerate`,
+      {
+        method: 'POST',
+        body: JSON.stringify(updates || {}),
+      }
+    );
+  }
+
+  getAudioUrl(episodeId: string): string {
+    return `/api/v1/episodes/${episodeId}/audio`;
+  }
+
   getEpisodeEventsUrl(episodeId: string): string {
     const token = localStorage.getItem('katha_access_token');
     return `/api/v1/generation/episodes/${episodeId}/events?token=${token || ''}`;

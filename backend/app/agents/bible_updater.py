@@ -89,3 +89,4 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
             "current_node": "bible_updater",
             "errors": [GraphErrorRecord(node="bible_updater", error=str(exc), timestamp=datetime.now(timezone.utc).isoformat(), recoverable=False)],
         }
+

@@ -138,3 +138,4 @@ class GraphErrorRecord(BaseModel):
     error: str
     timestamp: str
     recoverable: bool = True
+

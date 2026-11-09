@@ -45,3 +45,4 @@ class KathaEpisodeState(TypedDict, total=False):
     current_node: str
     errors: Annotated[list[GraphErrorRecord], add]
     simulation_flags: dict[str, Any]  # Used for testing forced mid-run failures & recovery
+

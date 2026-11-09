@@ -138,3 +138,4 @@ def launch_background_generation(
     task = asyncio.create_task(_runner())
     _running_jobs[episode_id] = task
     return True
+

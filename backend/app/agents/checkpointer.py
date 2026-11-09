@@ -33,3 +33,4 @@ async def get_checkpointer(force_memory: bool = False) -> BaseCheckpointSaver[An
             f"Could not initialize AsyncPostgresSaver ({exc}); using MemorySaver fallback."
         )
         return _in_memory_checkpointer
+

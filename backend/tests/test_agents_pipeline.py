@@ -205,3 +205,4 @@ async def test_job_idempotency_prevents_duplicate_runs() -> None:
     # Immediate second launch detects in-flight task and returns False
     second_call = launch_background_generation(test_ep_id, llm)
     assert second_call is False
+

@@ -77,12 +77,21 @@ export interface LocalizedScene {
   lines: LocalizedLine[];
 }
 
+export interface TimelineEntry {
+  line_id: string;
+  character_name: string;
+  start_seconds: number;
+  end_seconds: number;
+  duration_seconds: number;
+}
+
 export interface CastScript {
   title: string;
   target_language: string;
   cast: VoiceAssignment[];
   scenes: LocalizedScene[];
   total_lines: number;
+  timeline?: TimelineEntry[];
 }
 
 export interface SceneCritique {

@@ -111,3 +111,4 @@ async def critic_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
             "current_node": "critic",
             "errors": [GraphErrorRecord(node="critic", error=str(exc), timestamp=datetime.now(timezone.utc).isoformat(), recoverable=False)],
         }
+

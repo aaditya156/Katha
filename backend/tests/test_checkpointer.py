@@ -19,3 +19,4 @@ async def test_postgres_checkpointer_interface_and_fallback() -> None:
     # Verify AsyncPostgresSaver class attributes and methods exist
     assert hasattr(AsyncPostgresSaver, "from_conn_string")
     assert hasattr(AsyncPostgresSaver, "setup")
+
