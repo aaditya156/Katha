@@ -55,3 +55,4 @@ class GenerateOutlineRequest(BaseModel):
     target_duration_minutes: int = Field(default=5, ge=1, le=30)
     genre: str = Field(default="drama", max_length=100)
     characters_hint: list[str] | None = None
+

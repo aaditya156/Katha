@@ -99,3 +99,4 @@ async def test_ownership_enforcement_on_get_and_delete(
     # User A successfully deletes
     valid_delete = await client.delete(f"/api/v1/series/{series_id}", headers=auth_headers)
     assert valid_delete.status_code == 204
+

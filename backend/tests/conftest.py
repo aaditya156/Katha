@@ -117,3 +117,4 @@ def other_auth_headers(other_user: User) -> dict[str, str]:
     """Provide authorization headers for the secondary test user."""
     token = create_access_token(subject=other_user.id)
     return {"Authorization": f"Bearer {token}"}
+

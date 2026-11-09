@@ -35,3 +35,4 @@ class SeriesResponse(SeriesBase):
 
 class SeriesDetailResponse(SeriesResponse):
     episodes: list[EpisodeResponse] = Field(default_factory=list)
+

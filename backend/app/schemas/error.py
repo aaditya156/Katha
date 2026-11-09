@@ -13,3 +13,4 @@ class ProblemDetails(BaseModel):
     detail: str = Field(..., description="Human-readable explanation specific to occurrence")
     error_code: str = Field(..., description="Application specific machine-readable error code")
     extras: dict[str, Any] = Field(default_factory=dict, description="Diagnostic contextual metadata")
+

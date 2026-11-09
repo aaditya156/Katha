@@ -4,3 +4,4 @@ from app.models.series import Series
 from app.models.episode import Episode
 
 __all__ = ["Base", "User", "Series", "Episode"]
+

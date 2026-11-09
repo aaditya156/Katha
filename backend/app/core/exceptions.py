@@ -86,3 +86,4 @@ class SchemaValidationError(KathaException):
             error_code="SCHEMA_VALIDATION_ERROR",
             extras={"schema_name": schema_name, "raw_output": raw_output[:1000]},
         )
+

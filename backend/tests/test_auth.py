@@ -92,3 +92,4 @@ async def test_token_refresh(client: AsyncClient, test_user: User) -> None:
     data = response.json()
     assert "access_token" in data
     assert "refresh_token" in data
+

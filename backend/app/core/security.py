@@ -82,3 +82,4 @@ def decode_token(token: str) -> dict[str, Any]:
         raise AuthenticationFailedException(detail="Token has expired.")
     except jwt.InvalidTokenError as exc:
         raise AuthenticationFailedException(detail=f"Invalid token: {exc}")
+

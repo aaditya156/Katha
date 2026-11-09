@@ -119,3 +119,4 @@ async def delete_series(
 
     await db.delete(series)
     await db.commit()
+

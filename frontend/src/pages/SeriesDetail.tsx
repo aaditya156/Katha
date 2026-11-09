@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
 import { api } from '../services/api';
 import { Episode, EpisodeOutline, ProblemDetails, Series } from '../types';
 import {
@@ -29,6 +29,7 @@ export const SeriesDetail: React.FC = () => {
   const [generatedOutline, setGeneratedOutline] = useState<EpisodeOutline | null>(null);
   const [outlineError, setOutlineError] = useState<string | null>(null);
   const [isSavingEpisode, setIsSavingEpisode] = useState(false);
+  const navigate = useNavigate();
 
   const loadData = async () => {
     if (!id) return;
@@ -372,14 +373,15 @@ export const SeriesDetail: React.FC = () => {
             {episodes.map((ep) => (
               <div
                 key={ep.id}
-                className="p-5 bg-slate-900/60 border border-slate-800 hover:border-slate-700 rounded-2xl flex items-center justify-between gap-4 transition-all"
+                onClick={() => navigate(`/episodes/${ep.id}`)}
+                className="p-5 bg-slate-900/60 border border-slate-800 hover:border-amber-500/40 rounded-2xl flex items-center justify-between gap-4 transition-all cursor-pointer group hover:bg-slate-900"
               >
                 <div className="flex items-center gap-4">
-                  <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center font-mono font-bold text-amber-400">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center font-mono font-bold text-amber-400 group-hover:scale-105 transition-transform">
                     #{ep.episode_number}
                   </div>
                   <div>
-                    <h4 className="text-base font-bold text-white font-display">
+                    <h4 className="text-base font-bold text-white font-display group-hover:text-amber-400 transition-colors">
                       {ep.title}
                     </h4>
                     <p className="text-xs text-slate-400 mt-0.5 line-clamp-1">
@@ -395,6 +397,9 @@ export const SeriesDetail: React.FC = () => {
                   <span className="text-xs text-slate-500 flex items-center gap-1">
                     <Clock className="w-3.5 h-3.5" />
                     {ep.duration_minutes_target}m
+                  </span>
+                  <span className="text-xs text-amber-400 font-semibold hidden sm:inline-block ml-2 group-hover:translate-x-1 transition-transform">
+                    Enter Studio →
                   </span>
                 </div>
               </div>

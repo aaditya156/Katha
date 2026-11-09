@@ -126,3 +126,4 @@ PYTHONPATH=backend pytest backend/tests -v
 ## Next Steps: Phase 2 (LangGraph Agentic Pipeline)
 - Build the LangGraph cyclical state graph: `Planner` → `Writer` → `Critic` → `Conditional Revision Edge (max 2)` → `Localizer` (Hindi / Hinglish / English) → `Voice Caster`.
 - Wire live progress streaming via Redis Pub/Sub to FastAPI Server-Sent Events (SSE).
+

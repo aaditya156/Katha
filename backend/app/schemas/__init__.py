@@ -9,6 +9,21 @@ from app.schemas.outline import (
     CharacterAppearance,
     GenerateOutlineRequest,
 )
+from app.schemas.script import (
+    ScriptLine,
+    ScriptScene,
+    Script,
+    SceneCritique,
+    CritiqueReport,
+    LocalizedLine,
+    LocalizedScene,
+    LocalizedScript,
+    VoiceAssignment,
+    CastScript,
+    BibleUpdatePayload,
+    CharacterLoreUpdate,
+    GraphErrorRecord,
+)
 
 __all__ = [
     "ProblemDetails",
@@ -29,4 +44,18 @@ __all__ = [
     "DramaticBeat",
     "CharacterAppearance",
     "GenerateOutlineRequest",
+    "ScriptLine",
+    "ScriptScene",
+    "Script",
+    "SceneCritique",
+    "CritiqueReport",
+    "LocalizedLine",
+    "LocalizedScene",
+    "LocalizedScript",
+    "VoiceAssignment",
+    "CastScript",
+    "BibleUpdatePayload",
+    "CharacterLoreUpdate",
+    "GraphErrorRecord",
 ]
+

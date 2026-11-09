@@ -68,3 +68,4 @@ async def test_mock_provider_timeout_failure() -> None:
         )
     assert exc_info.value.error_code == "LLM_PROVIDER_ERROR"
     assert "timed out" in exc_info.value.detail
+

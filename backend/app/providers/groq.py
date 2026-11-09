@@ -132,3 +132,4 @@ class GroqProvider(BaseLLMProvider):
             return res_json["choices"][0]["message"]["content"]
         except Exception as exc:
             raise LLMProviderError("groq", f"Failed to parse text: {exc}") from exc
+

@@ -28,6 +28,84 @@ export interface Series {
   episodes?: Episode[];
 }
 
+export interface ScriptLine {
+  id: string;
+  line_number: number;
+  character_name: string;
+  text: string;
+  stage_direction: string;
+  emotion: string;
+  pace: string;
+  voice_id?: string | null;
+}
+
+export interface ScriptScene {
+  scene_number: number;
+  heading: string;
+  atmosphere_soundscape: string;
+  dramatic_objective: string;
+  characters_present: string[];
+  lines: ScriptLine[];
+}
+
+export interface VoiceAssignment {
+  character_name: string;
+  voice_id: string;
+  provider: string;
+  gender: string;
+  vocal_archetype: string;
+  speed: number;
+  pitch: number;
+}
+
+export interface LocalizedLine {
+  id: string;
+  line_number: number;
+  character_name: string;
+  text_original: string;
+  text_localized: string;
+  dialect_notes: string;
+  emotion?: string;
+  pace?: string;
+  voice_id?: string | null;
+}
+
+export interface LocalizedScene {
+  scene_number: number;
+  heading: string;
+  atmosphere_soundscape: string;
+  lines: LocalizedLine[];
+}
+
+export interface CastScript {
+  title: string;
+  target_language: string;
+  cast: VoiceAssignment[];
+  scenes: LocalizedScene[];
+  total_lines: number;
+}
+
+export interface SceneCritique {
+  scene_number: number;
+  passed: boolean;
+  score: number;
+  issues: string[];
+  suggested_improvements: string;
+}
+
+export interface CritiqueReport {
+  score: number;
+  passed: boolean;
+  consistency_score: number;
+  coherence_score: number;
+  naturalness_score: number;
+  pacing_score: number;
+  safety_score: number;
+  scene_critiques: SceneCritique[];
+  failing_scene_numbers: number[];
+  feedback: string;
+}
+
 export interface Episode {
   id: string;
   series_id: string;
@@ -38,7 +116,7 @@ export interface Episode {
   target_language: 'hindi' | 'hinglish' | 'english';
   duration_minutes_target: number;
   outline?: EpisodeOutline | null;
-  script?: Record<string, unknown> | null;
+  script?: CastScript | null;
   audio_url?: string | null;
   created_at: string;
   updated_at: string;
@@ -75,6 +153,14 @@ export interface EpisodeOutline {
   characters: CharacterAppearance[];
   scenes: SceneOutline[];
   cliffhanger_or_resolution: string;
+}
+
+export interface PipelineEvent {
+  episode_id: string;
+  event_type: string;
+  node?: string | null;
+  timestamp: string;
+  payload: Record<string, any>;
 }
 
 export interface ProblemDetails {

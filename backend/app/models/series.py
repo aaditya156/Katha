@@ -35,3 +35,4 @@ class Series(Base, UUIDMixin, TimestampMixin):
         cascade="all, delete-orphan",
         order_by="Episode.episode_number",
     )
+

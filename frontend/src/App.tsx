@@ -6,6 +6,7 @@ import { Register } from './pages/Register';
 import { SeriesList } from './pages/SeriesList';
 import { CreateSeries } from './pages/CreateSeries';
 import { SeriesDetail } from './pages/SeriesDetail';
+import { EpisodeStudio } from './pages/EpisodeStudio';
 import { Loader2 } from 'lucide-react';
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -57,6 +58,14 @@ export const App: React.FC = () => {
               </ProtectedRoute>
             }
           />
+          <Route
+            path="/episodes/:id"
+            element={
+              <ProtectedRoute>
+                <EpisodeStudio />
+              </ProtectedRoute>
+            }
+          />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AuthProvider>
@@ -65,3 +74,4 @@ export const App: React.FC = () => {
 };
 
 export default App;
+

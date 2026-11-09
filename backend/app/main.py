@@ -105,3 +105,4 @@ async def health_check() -> dict[str, str]:
 
 
 app.include_router(api_v1_router, prefix=settings.API_V1_STR)
+

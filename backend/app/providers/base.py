@@ -35,3 +35,4 @@ class BaseLLMProvider(ABC):
             LLMProviderError: On upstream network, auth, or rate limit failure.
         """
         pass
+

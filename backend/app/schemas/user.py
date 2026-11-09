@@ -40,3 +40,4 @@ class TokenPayload(BaseModel):
     iat: int
     exp: int
     type: str
+

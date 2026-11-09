@@ -34,3 +34,4 @@ class Episode(Base, UUIDMixin, TimestampMixin):
 
     # Relationships
     series: Mapped["Series"] = relationship("Series", back_populates="episodes")
+

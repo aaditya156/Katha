@@ -169,3 +169,4 @@ export const CreateSeries: React.FC = () => {
     </div>
   );
 };
+

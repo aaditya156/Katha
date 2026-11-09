@@ -25,3 +25,4 @@ async def test_database_schema_definitions() -> None:
         assert "episodes" in tables
 
     await engine.dispose()
+

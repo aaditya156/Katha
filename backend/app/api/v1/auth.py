@@ -112,3 +112,4 @@ async def refresh_access_token(
         refresh_token=new_refresh_token,
         user=UserResponse.model_validate(user),
     )
+

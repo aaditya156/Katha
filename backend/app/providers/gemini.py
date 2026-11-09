@@ -131,3 +131,4 @@ class GeminiProvider(BaseLLMProvider):
             return res_json["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as exc:
             raise LLMProviderError("gemini", f"Failed to parse text: {exc}") from exc
+

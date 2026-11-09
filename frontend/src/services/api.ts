@@ -99,6 +99,22 @@ class ApiClient {
     return this.request<Episode[]>(`/episodes/series/${seriesId}`);
   }
 
+  async getEpisode(episodeId: string): Promise<Episode> {
+    return this.request<Episode>(`/episodes/${episodeId}`);
+  }
+
+  async triggerGeneration(episodeId: string): Promise<{ status: string; message: string; episode_id: string }> {
+    return this.request<{ status: string; message: string; episode_id: string }>(
+      `/generation/episodes/${episodeId}/generate`,
+      { method: 'POST' }
+    );
+  }
+
+  getEpisodeEventsUrl(episodeId: string): string {
+    const token = localStorage.getItem('katha_access_token');
+    return `/api/v1/generation/episodes/${episodeId}/events?token=${token || ''}`;
+  }
+
   async createEpisode(data: {
     series_id: string;
     title: string;
@@ -130,3 +146,4 @@ class ApiClient {
 }
 
 export const api = new ApiClient();
+
