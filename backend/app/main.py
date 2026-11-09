@@ -1,4 +1,5 @@
 import logging
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,12 +16,31 @@ logger = logging.getLogger("katha_studio")
 
 settings = get_settings()
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan context: initialize event streaming and database schema."""
+    from app.core.events import event_hub
+    from app.core.database import engine
+    from app.models.base import Base
+    import app.models  # noqa: F401 - ensure all models are registered
+
+    await event_hub.initialize()
+
+    if settings.DATABASE_URL.startswith("sqlite"):
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        logger.info("Local SQLite database schema verified.")
+    yield
+
+
 app = FastAPI(
     title=settings.PROJECT_NAME,
     description="Agentic Multilingual Audio-Story Generation Platform",
     version="0.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 
 # CORS configuration
