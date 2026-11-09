@@ -52,6 +52,12 @@ services:
       LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-mock}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      SARVAM_API_KEY: ${SARVAM_API_KEY:-}
+      TTS_DEFAULT_PROVIDER: ${TTS_DEFAULT_PROVIDER:-mock}
+      STORY_BIBLE_RETRIEVAL_ENABLED: ${STORY_BIBLE_RETRIEVAL_ENABLED:-true}
+    volumes:
+      - ./audio_cache:/app/audio_cache
 
   frontend:
     build:

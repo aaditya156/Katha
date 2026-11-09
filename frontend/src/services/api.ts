@@ -1,7 +1,12 @@
 import {
   AuthTokens,
+  BenchmarkExperimentResponse,
+  CalibrationReport,
   Episode,
   EpisodeOutline,
+  EvaluationRun,
+  EvaluationSummaryMetrics,
+  GoldenTestCase,
   ProblemDetails,
   Series,
   StoryBibleEntry,
@@ -219,7 +224,63 @@ class ApiClient {
       }),
     });
   }
+
+  // Evaluations & Observability API
+  async getGoldenDataset(): Promise<GoldenTestCase[]> {
+    return this.request<GoldenTestCase[]>('/evaluations/golden-dataset');
+  }
+
+  async evaluateEpisode(
+    episodeId: string,
+    modelName: string = 'gemini-1.5-pro',
+    provider: string = 'gemini'
+  ): Promise<EvaluationRun> {
+    return this.request<EvaluationRun>(
+      `/evaluations/episodes/${episodeId}/evaluate?model_name=${encodeURIComponent(
+        modelName
+      )}&provider=${encodeURIComponent(provider)}`,
+      { method: 'POST' }
+    );
+  }
+
+  async listEvaluationRuns(
+    modelName?: string,
+    passed?: boolean,
+    limit: number = 50
+  ): Promise<EvaluationRun[]> {
+    const params = new URLSearchParams();
+    if (modelName) params.append('model_name', modelName);
+    if (passed !== undefined) params.append('passed', String(passed));
+    params.append('limit', String(limit));
+    return this.request<EvaluationRun[]>(`/evaluations/runs?${params.toString()}`);
+  }
+
+  async getEvaluationSummary(): Promise<EvaluationSummaryMetrics> {
+    return this.request<EvaluationSummaryMetrics>('/evaluations/summary');
+  }
+
+  async runBenchmarkExperiment(
+    experimentType: 'critic_on_off' | 'rag_ablation' | 'model_comparison',
+    numCases: number = 6,
+    modelA: string = 'gemini-1.5-pro',
+    modelB: string = 'gemini-1.5-flash'
+  ): Promise<BenchmarkExperimentResponse> {
+    const params = new URLSearchParams({
+      experiment_type: experimentType,
+      num_cases: String(numCases),
+      model_a: modelA,
+      model_b: modelB,
+    });
+    return this.request<BenchmarkExperimentResponse>(`/evaluations/benchmark?${params.toString()}`, {
+      method: 'POST',
+    });
+  }
+
+  async getCalibrationReport(): Promise<CalibrationReport> {
+    return this.request<CalibrationReport>('/evaluations/calibration');
+  }
 }
 
 export const api = new ApiClient();
+
 

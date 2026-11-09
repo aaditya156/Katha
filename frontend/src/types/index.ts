@@ -205,3 +205,118 @@ export interface ProblemDetails {
   error_code: string;
   extras?: Record<string, unknown>;
 }
+
+export interface GoldenTestCase {
+  id: string;
+  title: string;
+  premise: string;
+  genre: string;
+  target_language: string;
+  target_duration_minutes: number;
+  expected_characters: string[];
+  key_continuity_elements: string[];
+  difficulty: string;
+}
+
+export interface DimensionScore {
+  score: number;
+  reasoning: string;
+  evidence: string[];
+}
+
+export interface EvaluationRubricOutput {
+  character_consistency: DimensionScore;
+  plot_coherence: DimensionScore;
+  language_naturalness: DimensionScore;
+  pacing: DimensionScore;
+  safety: DimensionScore;
+  overall_critique: string;
+}
+
+export interface EvaluationRun {
+  id: string;
+  series_id?: string | null;
+  episode_id?: string | null;
+  test_case_id?: string | null;
+  model_name: string;
+  provider: string;
+  critic_enabled: boolean;
+  retrieval_enabled: boolean;
+  latency_ms: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  estimated_cost_usd: number;
+  revision_count: number;
+  tts_cache_hit_rate: number;
+  composite_score: number;
+  character_consistency: number;
+  plot_coherence: number;
+  language_naturalness: number;
+  pacing: number;
+  safety: number;
+  passed: boolean;
+  verdict: string;
+  scores_json: Record<string, any>;
+  node_latencies_json: Record<string, any>;
+  feedback: string;
+  created_at: string;
+}
+
+export interface EvaluationSummaryMetrics {
+  total_runs: number;
+  pass_rate: number;
+  avg_quality_score: number;
+  dimension_averages: {
+    character_consistency: number;
+    plot_coherence: number;
+    language_naturalness: number;
+    pacing: number;
+    safety: number;
+  };
+  p50_latency_ms: number;
+  p95_latency_ms: number;
+  total_cost_usd: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  avg_revision_count: number;
+  avg_tts_cache_hit_rate: number;
+  failure_taxonomy: Record<string, number>;
+}
+
+export interface ExperimentVariantMetrics {
+  variant_name: string;
+  sample_count: number;
+  avg_composite_score: number;
+  avg_character_consistency: number;
+  avg_plot_coherence: number;
+  avg_language_naturalness: number;
+  avg_pacing: number;
+  avg_safety: number;
+  avg_latency_ms: number;
+  p50_latency_ms: number;
+  p95_latency_ms: number;
+  avg_tokens: number;
+  avg_cost_usd: number;
+  pass_rate: number;
+  revision_rate: number;
+  tts_cache_hit_rate: number;
+}
+
+export interface BenchmarkExperimentResponse {
+  experiment_id: string;
+  experiment_type: 'critic_on_off' | 'rag_ablation' | 'model_comparison';
+  title: string;
+  variants: ExperimentVariantMetrics[];
+  delta_analysis: Record<string, any>;
+  created_at: string;
+}
+
+export interface CalibrationReport {
+  total_samples: number;
+  spearman_correlation: Record<string, number>;
+  weighted_cohens_kappa: Record<string, number>;
+  mean_absolute_error: Record<string, number>;
+  identified_weaknesses: string[];
+  recommendations: string[];
+  calibration_status: 'EXCELLENT' | 'ACCEPTABLE' | 'NEEDS_TUNING';
+}

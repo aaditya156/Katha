@@ -12,6 +12,7 @@ import {
   Radio,
   Sparkles,
   Loader2,
+  Activity,
 } from 'lucide-react';
 
 export const SeriesList: React.FC = () => {
@@ -73,6 +74,14 @@ export const SeriesList: React.FC = () => {
             <span className="text-sm text-slate-400 hidden sm:inline-block">
               {user?.full_name || user?.email}
             </span>
+            <Link
+              to="/evaluations"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
+              title="Evaluation & Observability Dashboard"
+            >
+              <Activity className="w-4 h-4 text-amber-400" />
+              <span className="hidden md:inline">Evaluations & Metrics</span>
+            </Link>
             <Link
               to="/series/new"
               className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold bg-amber-500 hover:bg-amber-400 text-slate-950 transition-all shadow-md shadow-amber-500/10"

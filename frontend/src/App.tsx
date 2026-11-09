@@ -7,6 +7,7 @@ import { SeriesList } from './pages/SeriesList';
 import { CreateSeries } from './pages/CreateSeries';
 import { SeriesDetail } from './pages/SeriesDetail';
 import { EpisodeStudio } from './pages/EpisodeStudio';
+import { EvaluationDashboard } from './pages/EvaluationDashboard';
 import { Loader2 } from 'lucide-react';
 
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -63,6 +64,14 @@ export const App: React.FC = () => {
             element={
               <ProtectedRoute>
                 <EpisodeStudio />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/evaluations"
+            element={
+              <ProtectedRoute>
+                <EvaluationDashboard />
               </ProtectedRoute>
             }
           />

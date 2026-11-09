@@ -3,6 +3,14 @@ from app.models.user import User
 from app.models.series import Series
 from app.models.episode import Episode
 from app.models.story_bible import StoryBibleEntry
+from app.models.evaluation import EvaluationRun, BenchmarkExperiment
 
-__all__ = ["Base", "User", "Series", "Episode", "StoryBibleEntry"]
-
+__all__ = [
+    "Base",
+    "User",
+    "Series",
+    "Episode",
+    "StoryBibleEntry",
+    "EvaluationRun",
+    "BenchmarkExperiment",
+]

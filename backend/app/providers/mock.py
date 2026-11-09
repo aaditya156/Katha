@@ -26,6 +26,7 @@ from app.schemas.story_bible import (
     RelationshipFact,
     StoryBibleExtraction,
 )
+from app.schemas.evaluation import DimensionScore, EvaluationRubricOutput
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -484,6 +485,102 @@ class MockLLMProvider(BaseLLMProvider):
                 "episode_synopsis": "During a live graveyard shift, RJ Kabir takes an eerie caller warning about a train from 1947, culminating in an impossible physical telegram on his desk.",
             }
             return schema.model_validate(extraction_data)
+
+        # 9. EvaluationRubricOutput (Phase 5 LLM Judge Rubric)
+        if schema == EvaluationRubricOutput:
+            # Calibrate mock scores based on prompt cues if evaluating calibration samples
+            is_defective = "defective" in prompt.lower() or "hallucination" in prompt.lower() or "broken" in prompt.lower()
+            is_medium = "medium" in prompt.lower() or "decent" in prompt.lower()
+
+            if is_defective or self.mode == "judge_low_quality":
+                judge_data = {
+                    "character_consistency": {
+                        "score": 2.2,
+                        "reasoning": "Major vocal persona drift; characters contradict established motivations.",
+                        "evidence": ["Character personality flipped unexpectedly in scene 2"],
+                    },
+                    "plot_coherence": {
+                        "score": 2.0,
+                        "reasoning": "Significant plot holes and unexplained temporal shifts.",
+                        "evidence": ["Cause and effect breakdown in dialogue sequence"],
+                    },
+                    "language_naturalness": {
+                        "score": 2.3,
+                        "reasoning": "Robotic phrasing and awkward dialect transliteration.",
+                        "evidence": ["Literal machine translation artifact detected"],
+                    },
+                    "pacing": {
+                        "score": 2.1,
+                        "reasoning": "Severe pacing stalls and dialogue bloat without acoustic sound cues.",
+                        "evidence": ["Overlong monologues without stage directions"],
+                    },
+                    "safety": {
+                        "score": 4.5,
+                        "reasoning": "Mild content warnings, no severe violations.",
+                        "evidence": [],
+                    },
+                    "overall_critique": "Script fails audio production standards due to incoherent plot progression and robotic speech.",
+                }
+            elif is_medium or self.mode == "judge_medium_quality":
+                judge_data = {
+                    "character_consistency": {
+                        "score": 3.6,
+                        "reasoning": "Acceptable character differentiation, though dialogue can feel generic.",
+                        "evidence": ["Characters have recognizable traits but lack deep vocal contrast"],
+                    },
+                    "plot_coherence": {
+                        "score": 3.6,
+                        "reasoning": "Logical dramatic spine with minor unresolved threads.",
+                        "evidence": ["A couple of dialogue beats lack clear stakes"],
+                    },
+                    "language_naturalness": {
+                        "score": 3.7,
+                        "reasoning": "Good conversational flow with occasional stiff phrases.",
+                        "evidence": ["Colloquial code-switching mostly natural"],
+                    },
+                    "pacing": {
+                        "score": 3.4,
+                        "reasoning": "Moderate pacing; middle scene slows down during exposition.",
+                        "evidence": ["Middle scene has delayed conflict introduction"],
+                    },
+                    "safety": {
+                        "score": 5.0,
+                        "reasoning": "Fully compliant with audio broadcast safety guidelines.",
+                        "evidence": [],
+                    },
+                    "overall_critique": "Competent episode draft with solid narrative structure; would benefit from tighter scene pacing.",
+                }
+            else:
+                # High quality / production standard
+                judge_data = {
+                    "character_consistency": {
+                        "score": 4.8,
+                        "reasoning": "Superb vocal archetype distinction and authentic subtext for all cast members.",
+                        "evidence": ["Rich character voice distinctiveness throughout all scenes"],
+                    },
+                    "plot_coherence": {
+                        "score": 4.7,
+                        "reasoning": "Tight dramatic progression with compelling acoustic stakes and organic cliffhanger.",
+                        "evidence": ["Clear cause-and-effect beats matching episode outline"],
+                    },
+                    "language_naturalness": {
+                        "score": 4.8,
+                        "reasoning": "Culturally authentic dialect adaptation with natural colloquial cadence.",
+                        "evidence": ["Exceptional linguistic flow and authentic idioms"],
+                    },
+                    "pacing": {
+                        "score": 4.6,
+                        "reasoning": "Immersive acoustic soundscape instructions and crisp dramatic tempo.",
+                        "evidence": ["Audio sound cues tightly synchronized with dialogue turns"],
+                    },
+                    "safety": {
+                        "score": 5.0,
+                        "reasoning": "Exemplary adherence to audio broadcast standards.",
+                        "evidence": [],
+                    },
+                    "overall_critique": "Outstanding production-ready audio story episode with vivid sound design.",
+                }
+            return schema.model_validate(judge_data)
 
         try:
             return schema.model_validate({})
