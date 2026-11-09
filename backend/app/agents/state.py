@@ -9,6 +9,7 @@ from app.schemas.script import (
     LocalizedScript,
     Script,
 )
+from app.schemas.story_bible import StoryBibleExtraction
 
 
 class KathaEpisodeState(TypedDict, total=False):
@@ -39,6 +40,7 @@ class KathaEpisodeState(TypedDict, total=False):
     localized_script: LocalizedScript | None
     cast_script: CastScript | None
     bible_updates: BibleUpdatePayload | None
+    story_bible_extraction: StoryBibleExtraction | None
 
     # Graph Lifecycle & Reliability
     status: str  # PENDING, PLANNING, WRITING, CRITIQUING, REVISING, LOCALIZING, CASTING, UPDATING_BIBLE, COMPLETED, FAILED

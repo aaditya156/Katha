@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     SARVAM_API_KEY: str = ""
     ELEVENLABS_API_KEY: str = ""
 
+    # Story Bible & RAG (Phase 4)
+    STORY_BIBLE_RETRIEVAL_ENABLED: bool = True
+    EMBEDDING_PROVIDER: Literal["mock", "gemini"] = "mock"
+
     # Observability
     LANGFUSE_PUBLIC_KEY: str = ""
     LANGFUSE_SECRET_KEY: str = ""

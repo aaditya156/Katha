@@ -190,3 +190,4 @@ async def test_per_line_regeneration_efficiency(temp_cache_dir: Path) -> None:
     master_path_2, timeline_2 = await assembler.assemble_episode(new_entries, temp_cache_dir / "master_v2.wav")
     assert master_path_2.exists()
     assert len(timeline_2) == 3
+

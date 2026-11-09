@@ -172,6 +172,31 @@ export interface PipelineEvent {
   payload: Record<string, any>;
 }
 
+export interface StoryBibleEntry {
+  id: string;
+  series_id: string;
+  episode_id?: string | null;
+  entity_type: 'character' | 'relationship' | 'location' | 'event' | 'open_plot_thread' | 'rule' | 'episode_summary' | string;
+  entity_name: string;
+  content: string;
+  metadata_json: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface StoryBibleSearchResult {
+  entry: StoryBibleEntry;
+  score: number;
+  retrieval_method: string;
+}
+
+export interface StoryBibleSearchResponse {
+  status: 'RETRIEVAL_SUCCESS' | 'RETRIEVAL_EMPTY' | 'RETRIEVAL_DISABLED';
+  query: string;
+  results: StoryBibleSearchResult[];
+  retrieval_enabled: boolean;
+}
+
 export interface ProblemDetails {
   type: string;
   title: string;

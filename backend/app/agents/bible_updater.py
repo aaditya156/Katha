@@ -5,7 +5,9 @@ from app.agents.state import KathaEpisodeState
 from app.core.events import event_hub
 from app.core.exceptions import LLMProviderError, SchemaValidationError
 from app.providers.base import BaseLLMProvider
-from app.schemas.script import BibleUpdatePayload, GraphErrorRecord
+from app.schemas.script import BibleUpdatePayload, CharacterLoreUpdate, GraphErrorRecord
+from app.schemas.story_bible import StoryBibleExtraction
+from app.services.story_bible import story_bible_service
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,7 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
     """Bible Updater Agent: Synthesizes episodic character arc evolutions and narrative lore."""
     episode_id = state.get("episode_id", "unknown")
     episode_num = state.get("episode_number", 1)
+    series_id = state.get("series_id", "")
     logger.info(f"[{episode_id}] Executing Bible Updater Node for Episode {episode_num}")
 
     await event_hub.publish(
@@ -42,13 +45,16 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
         raise ValueError("Bible Updater requires cast_script and outline in state.")
 
     prompt = (
-        f"Extract narrative continuity updates from Episode {episode_num}: '{cast_script.title}'.\n"
+        f"Extract narrative continuity updates, character facts, locations, and open plot threads from Episode {episode_num}: '{cast_script.title}'.\n"
         f"Original Outline Premise: {outline.logline}\n"
         f"Cliffhanger / Resolution: {outline.cliffhanger_or_resolution}\n\n"
         f"Identify:\n"
-        f"1. Concise 2-3 sentence episode summary.\n"
-        f"2. How character relationships and psychological traits evolved.\n"
-        f"3. Any new lore, secrets, or world rules established in this episode."
+        f"1. Characters involved, their updated psychological traits, vocal archetype, and state at the end of the episode.\n"
+        f"2. Inter-character relationship dynamics and shifts.\n"
+        f"3. Locations featured with acoustic soundscape details.\n"
+        f"4. Major episodic plot events.\n"
+        f"5. Open plot threads, mysteries, or unresolved narrative hooks.\n"
+        f"6. Concise 2-3 sentence episode synopsis."
     )
     system_prompt = (
         "You are the master Story Bible Archivist in Katha Studio. "
@@ -56,16 +62,58 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
     )
 
     try:
-        bible_updates: BibleUpdatePayload = await llm.generate_structured(
+        extraction: StoryBibleExtraction = await llm.generate_structured(
             prompt=prompt,
-            schema=BibleUpdatePayload,
+            schema=StoryBibleExtraction,
             system_prompt=system_prompt,
+        )
+
+        # Persist structured facts into database with deduplication and vector embeddings
+        saved_entries = []
+        if series_id:
+            try:
+                saved_entries = await story_bible_service.store_facts(
+                    series_id=series_id,
+                    episode_id=episode_id,
+                    extraction=extraction,
+                )
+                logger.info(f"[{episode_id}] Successfully stored {len(saved_entries)} Story Bible facts into PostgreSQL.")
+            except Exception as store_err:
+                logger.error(f"[{episode_id}] Failed to persist Story Bible facts: {store_err}", exc_info=True)
+                if sim_flags.get("fail_on_retrieval_error"):
+                    raise
+
+        # Construct backward-compatible BibleUpdatePayload
+        bible_updates = BibleUpdatePayload(
+            episode_number=episode_num,
+            episode_summary=extraction.episode_synopsis,
+            cliffhanger_or_resolution=outline.cliffhanger_or_resolution,
+            character_updates=[
+                CharacterLoreUpdate(
+                    character_name=c.name,
+                    trait_evolutions=c.traits,
+                    relationship_shifts=[r.dynamic for r in extraction.relationships if r.character_a == c.name or r.character_b == c.name],
+                )
+                for c in extraction.characters
+            ],
+            new_world_lore=[f"{loc.name}: {loc.significance}" for loc in extraction.locations],
+        )
+
+        await event_hub.publish(
+            episode_id=episode_id,
+            event_type="bible_updated",
+            node="bible_updater",
+            payload={
+                "summary": extraction.episode_synopsis,
+                "saved_facts_count": len(saved_entries),
+                "open_threads_count": len(extraction.open_plot_threads),
+            },
         )
         await event_hub.publish(
             episode_id=episode_id,
             event_type="node_completed",
             node="bible_updater",
-            payload={"summary": bible_updates.episode_summary},
+            payload={"summary": extraction.episode_synopsis},
         )
         await event_hub.publish(
             episode_id=episode_id,
@@ -80,6 +128,7 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
         )
         return {
             "bible_updates": bible_updates,
+            "story_bible_extraction": extraction,
             "status": "COMPLETED",
             "current_node": "bible_updater",
         }
@@ -89,4 +138,3 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
             "current_node": "bible_updater",
             "errors": [GraphErrorRecord(node="bible_updater", error=str(exc), timestamp=datetime.now(timezone.utc).isoformat(), recoverable=False)],
         }
-

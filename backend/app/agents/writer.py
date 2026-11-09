@@ -35,6 +35,31 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
         )
         raise RuntimeError(err_msg)
 
+    # Retrieve relevant Story Bible memories for character voice & continuity
+    series_id = state.get("series_id", "")
+    story_bible_context = ""
+    retrieval_override = sim_flags.get("retrieval_enabled")
+
+    try:
+        from app.services.story_bible import story_bible_service
+
+        search_res = await story_bible_service.hybrid_search(
+            series_id=series_id,
+            query=f"{outline.title} {outline.logline}",
+            limit=4,
+            retrieval_enabled=retrieval_override,
+        )
+        if search_res.status == "RETRIEVAL_SUCCESS":
+            memories = "\n".join(f"- [{r.entry.entity_type.upper()}] {r.entry.entity_name}: {r.entry.content}" for r in search_res.results)
+            story_bible_context = f"\nRelevant Story Bible Memories & Character Lore:\n{memories}\n"
+            logger.info(f"[{episode_id}] Injected {len(search_res.results)} Story Bible memories into Writer.")
+        elif search_res.status == "RETRIEVAL_DISABLED":
+            logger.info(f"[{episode_id}] Story Bible retrieval disabled for Writer (Ablation).")
+    except Exception as exc:
+        logger.error(f"[{episode_id}] Story Bible retrieval error in Writer: {exc}")
+        if sim_flags.get("fail_on_retrieval_error"):
+            raise
+
     # REVISION MODE: Rewrite ONLY failing scenes
     if existing_script and failing_scenes:
         logger.info(f"[{episode_id}] Writer in REVISION mode (Cycle {revision_count + 1}): Rewriting failing scenes {failing_scenes}")
@@ -71,6 +96,7 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
                     f"Scene Heading: {orig_scene.heading}\n"
                     f"Atmosphere / Soundscape: {orig_scene.atmosphere_soundscape}\n"
                     f"Characters Present: {', '.join(orig_scene.characters_present)}\n"
+                    f"{story_bible_context}"
                     f"Original Spoken Lines:\n"
                     + "\n".join(f"[{l.character_name}]: {l.text} ({l.stage_direction})" for l in orig_scene.lines)
                     + f"\n\nCRITIQUE FEEDBACK TO ADDRESS IN REWRITE:\n{critique_feedback}\n"
@@ -143,6 +169,7 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
         f"Target Language: {state.get('target_language', 'hindi')}\n"
         f"Target Duration: {state.get('target_duration_minutes', 5)} minutes\n"
         f"Logline: {outline.logline}\n\n"
+        f"{story_bible_context}"
         f"Outline Scenes Specification:\n{scenes_json}\n\n"
         f"Write complete, rich, multi-character dialogue lines for every scene."
     )

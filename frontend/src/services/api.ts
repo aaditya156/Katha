@@ -1,4 +1,13 @@
-import { AuthTokens, Episode, EpisodeOutline, ProblemDetails, Series, User } from '../types';
+import {
+  AuthTokens,
+  Episode,
+  EpisodeOutline,
+  ProblemDetails,
+  Series,
+  StoryBibleEntry,
+  StoryBibleSearchResponse,
+  User,
+} from '../types';
 
 const API_BASE = '/api/v1';
 
@@ -166,6 +175,48 @@ class ApiClient {
     return this.request<EpisodeOutline>('/episodes/generate-outline', {
       method: 'POST',
       body: JSON.stringify(data),
+    });
+  }
+  // Story Bible API
+  async listStoryBible(seriesId: string, entityType?: string): Promise<StoryBibleEntry[]> {
+    const q = entityType ? `?entity_type=${encodeURIComponent(entityType)}` : '';
+    return this.request<StoryBibleEntry[]>(`/series/${seriesId}/bible${q}`);
+  }
+
+  async createStoryBibleEntry(
+    seriesId: string,
+    data: {
+      entity_type: string;
+      entity_name: string;
+      content: string;
+      metadata_json?: Record<string, any>;
+    }
+  ): Promise<StoryBibleEntry> {
+    return this.request<StoryBibleEntry>(`/series/${seriesId}/bible`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteStoryBibleEntry(seriesId: string, entryId: string): Promise<void> {
+    return this.request<void>(`/series/${seriesId}/bible/${entryId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async searchStoryBible(
+    seriesId: string,
+    query: string,
+    limit: number = 5,
+    retrievalEnabled?: boolean
+  ): Promise<StoryBibleSearchResponse> {
+    return this.request<StoryBibleSearchResponse>(`/series/${seriesId}/bible/search`, {
+      method: 'POST',
+      body: JSON.stringify({
+        query,
+        limit,
+        retrieval_enabled: retrievalEnabled,
+      }),
     });
   }
 }

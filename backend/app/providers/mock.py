@@ -18,6 +18,14 @@ from app.schemas.script import (
     ScriptScene,
     VoiceAssignment,
 )
+from app.schemas.story_bible import (
+    CharacterFact,
+    EventFact,
+    LocationFact,
+    PlotThreadFact,
+    RelationshipFact,
+    StoryBibleExtraction,
+)
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -426,6 +434,56 @@ class MockLLMProvider(BaseLLMProvider):
                 "new_world_lore": ["Radio Mirage studio operates on a frequency overlapping historic telegraph lines."],
             }
             return schema.model_validate(bible_data)
+
+        # 8. StoryBibleExtraction (Phase 4 Structured Fact Extraction)
+        if schema == StoryBibleExtraction:
+            extraction_data = {
+                "characters": [
+                    {
+                        "name": "Kabir",
+                        "traits": ["skeptical", "inquisitive", "night-owl"],
+                        "vocal_traits": "warm late-night RJ baritone",
+                        "current_state": "deeply rattled by supernatural telegram",
+                    },
+                    {
+                        "name": "Ananya",
+                        "traits": ["pragmatic", "deadline-focused", "rational"],
+                        "vocal_traits": "sharp energetic producer alto",
+                        "current_state": "worried about station licensing and Kabir's focus",
+                    },
+                ],
+                "relationships": [
+                    {
+                        "character_a": "Kabir",
+                        "character_b": "Ananya",
+                        "dynamic": "Colleagues with playful tension; Ananya acts as Kabir's reality anchor.",
+                        "status": "strained due to mystery caller",
+                    }
+                ],
+                "locations": [
+                    {
+                        "name": "Radio Mirage Studio",
+                        "atmosphere_soundscape": "Low air-conditioner hum, neon tube buzz, and analogue hiss.",
+                        "significance": "Isolated soundproof booth at 2 AM where historic frequencies bleed through.",
+                    }
+                ],
+                "events": [
+                    {
+                        "title": "Midnight 1947 Broadcast",
+                        "description": "An unidentified caller on line four spoke of the 1947 Lahore Express as if it were departing tonight.",
+                        "characters_involved": ["Kabir", "Ananya"],
+                    }
+                ],
+                "open_plot_threads": [
+                    {
+                        "thread_id": "lahore_express_telegram",
+                        "description": "Who dispatched the physical 1947 telegram onto Kabir's locked console?",
+                        "status": "open",
+                    }
+                ],
+                "episode_synopsis": "During a live graveyard shift, RJ Kabir takes an eerie caller warning about a train from 1947, culminating in an impossible physical telegram on his desk.",
+            }
+            return schema.model_validate(extraction_data)
 
         try:
             return schema.model_validate({})

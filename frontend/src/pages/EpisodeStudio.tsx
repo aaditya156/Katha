@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '../services/api';
-import { CastScript, Episode, PipelineEvent, Series, TimelineEntry } from '../types';
+import { CastScript, Episode, PipelineEvent, Series, StoryBibleEntry, TimelineEntry } from '../types';
 import {
   ArrowLeft,
   Play,
@@ -20,6 +20,10 @@ import {
   Check,
   X,
   Headphones,
+  BookOpen,
+  Bookmark,
+  Compass,
+  MapPin,
 } from 'lucide-react';
 
 const PIPELINE_NODES = [
@@ -35,7 +39,8 @@ export const EpisodeStudio: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const [episode, setEpisode] = useState<Episode | null>(null);
   const [series, setSeries] = useState<Series | null>(null);
-  const [activeTab, setActiveTab] = useState<'script' | 'cast' | 'outline' | 'logs'>('script');
+  const [bibleEntries, setBibleEntries] = useState<StoryBibleEntry[]>([]);
+  const [activeTab, setActiveTab] = useState<'script' | 'cast' | 'outline' | 'bible' | 'logs'>('script');
   const [isLoading, setIsLoading] = useState(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isSynthesizingAudio, setIsSynthesizingAudio] = useState(false);
@@ -64,8 +69,12 @@ export const EpisodeStudio: React.FC = () => {
       const epData = await api.getEpisode(id);
       setEpisode(epData);
       if (epData.series_id) {
-        const seriesData = await api.getSeries(epData.series_id);
+        const [seriesData, bEntries] = await Promise.all([
+          api.getSeries(epData.series_id),
+          api.listStoryBible(epData.series_id),
+        ]);
         setSeries(seriesData);
+        setBibleEntries(bEntries);
       }
     } catch {
       // Error handled in UI
@@ -99,6 +108,10 @@ export const EpisodeStudio: React.FC = () => {
 
         if (parsed.event_type === 'scene_rewritten') {
           setRevisionCount((prev) => prev + 1);
+        }
+
+        if (parsed.event_type === 'bible_updated') {
+          fetchEpisodeData();
         }
 
         if (parsed.event_type === 'pipeline_completed' || parsed.event_type === 'audio_generation_completed') {
@@ -388,6 +401,17 @@ export const EpisodeStudio: React.FC = () => {
             Dramatic Architecture
           </button>
           <button
+            onClick={() => setActiveTab('bible')}
+            className={`pb-3 text-sm font-semibold flex items-center gap-2 border-b-2 transition-colors ${
+              activeTab === 'bible'
+                ? 'border-purple-500 text-purple-400'
+                : 'border-transparent text-slate-400 hover:text-white'
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+            Story Bible ({bibleEntries.length})
+          </button>
+          <button
             onClick={() => setActiveTab('logs')}
             className={`pb-3 text-sm font-semibold flex items-center gap-2 border-b-2 transition-colors ${
               activeTab === 'logs'
@@ -624,6 +648,78 @@ export const EpisodeStudio: React.FC = () => {
               <span className="text-xs font-bold text-amber-400 uppercase">Cliffhanger</span>
               <p className="text-sm text-amber-200 mt-1">{episode.outline.cliffhanger_or_resolution}</p>
             </div>
+          </div>
+        )}
+
+        {/* Tab Content: Story Bible Memory & Lore */}
+        {activeTab === 'bible' && (
+          <div className="space-y-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <BookOpen className="w-5 h-5 text-purple-400" />
+                  Series Story Bible & Episodic Memory
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Persistent facts used by Planner and Writer agents for long-range narrative continuity.
+                </p>
+              </div>
+              <span className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-purple-500/10 text-purple-300 border border-purple-500/20">
+                {bibleEntries.length} Saved Entries
+              </span>
+            </div>
+
+            {bibleEntries.length === 0 ? (
+              <div className="border border-dashed border-slate-800 rounded-2xl p-8 text-center bg-slate-900/20">
+                <BookOpen className="w-10 h-10 text-slate-600 mx-auto mb-2" />
+                <h4 className="text-base font-semibold text-white">No Story Bible lore saved yet</h4>
+                <p className="text-xs text-slate-400 mt-1 max-w-sm mx-auto">
+                  Facts are extracted automatically when the Bible Updater agent finishes processing this episode.
+                </p>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {bibleEntries.map((entry) => (
+                  <div
+                    key={entry.id}
+                    className="p-4 bg-slate-900/60 border border-slate-800 rounded-xl space-y-2 hover:border-purple-500/30 transition-all"
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        {entry.entity_type === 'character' && (
+                          <Bookmark className="w-4 h-4 text-purple-400" />
+                        )}
+                        {entry.entity_type === 'location' && (
+                          <MapPin className="w-4 h-4 text-emerald-400" />
+                        )}
+                        {entry.entity_type === 'open_plot_thread' && (
+                          <Compass className="w-4 h-4 text-amber-400" />
+                        )}
+                        <span className="font-bold text-white text-sm">{entry.entity_name}</span>
+                      </div>
+                      <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-800 text-slate-400">
+                        {entry.entity_type}
+                      </span>
+                    </div>
+                    <p className="text-xs text-slate-300 leading-relaxed">{entry.content}</p>
+                    {entry.metadata_json && Object.keys(entry.metadata_json).length > 0 && (
+                      <div className="flex flex-wrap gap-1 pt-2">
+                        {entry.metadata_json.traits && (
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-slate-950 text-slate-400 border border-slate-800">
+                            Traits: {entry.metadata_json.traits.join(', ')}
+                          </span>
+                        )}
+                        {entry.metadata_json.status && (
+                          <span className="text-[10px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">
+                            Status: {entry.metadata_json.status}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
 

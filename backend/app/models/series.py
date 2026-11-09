@@ -5,6 +5,8 @@ from app.models.base import Base, TimestampMixin, UUIDMixin
 
 if TYPE_CHECKING:
     from app.models.episode import Episode
+    from app.models.series import Series
+    from app.models.story_bible import StoryBibleEntry
     from app.models.user import User
 
 
@@ -34,5 +36,10 @@ class Series(Base, UUIDMixin, TimestampMixin):
         back_populates="series",
         cascade="all, delete-orphan",
         order_by="Episode.episode_number",
+    )
+    story_bible_entries: Mapped[list["StoryBibleEntry"]] = relationship(
+        "StoryBibleEntry",
+        back_populates="series",
+        cascade="all, delete-orphan",
     )
 

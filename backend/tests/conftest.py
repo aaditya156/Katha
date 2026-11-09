@@ -33,11 +33,15 @@ TestAsyncSessionLocal = async_sessionmaker(
 @pytest.fixture(autouse=True)
 async def setup_test_db() -> AsyncGenerator[None, None]:
     """Create all tables before each test and drop them after."""
+    from app.services.story_bible import story_bible_service
+
+    story_bible_service.session_factory = TestAsyncSessionLocal
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     yield
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+    story_bible_service.session_factory = None
 
 
 @pytest.fixture
