@@ -44,9 +44,11 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
     try:
         from app.services.story_bible import story_bible_service
 
+        char_names = " ".join(c.name for c in outline.characters) if outline.characters else ""
+        retrieval_query = f"{outline.title} {outline.logline} {char_names}".strip()
         search_res = await story_bible_service.hybrid_search(
             series_id=series_id,
-            query=f"{outline.title} {outline.logline}",
+            query=retrieval_query,
             limit=4,
             retrieval_enabled=retrieval_override,
         )

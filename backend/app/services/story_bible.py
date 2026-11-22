@@ -1,7 +1,8 @@
 import logging
 import math
+import re
 from typing import Any
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.database import async_session_factory
@@ -46,7 +47,7 @@ def cosine_similarity(v1: list[float], v2: list[float]) -> float:
 
 
 class StoryBibleService:
-    """Production service for Story Bible episodic persistence, hybrid vector+keyword retrieval, and reranking."""
+    """Production service for Story Bible episodic persistence, native pgvector + full-text search, and RRF ranking."""
 
     def __init__(
         self,
@@ -185,6 +186,106 @@ class StoryBibleService:
             if should_close:
                 await db.close()
 
+    async def _search_postgres(
+        self,
+        db: AsyncSession,
+        series_id: str,
+        query: str,
+        query_vector: list[float],
+        candidate_limit: int,
+    ) -> tuple[list[tuple[StoryBibleEntry, float]], list[tuple[StoryBibleEntry, float]]]:
+        """Execute native pgvector cosine similarity search and PostgreSQL full-text search directly in the database."""
+        # 1. Native pgvector Cosine Similarity Search using HNSW index
+        dist_expr = StoryBibleEntry.embedding.cosine_distance(query_vector).label("distance")
+        dense_stmt = (
+            select(
+                StoryBibleEntry,
+                dist_expr,
+            )
+            .where(
+                StoryBibleEntry.series_id == series_id,
+                StoryBibleEntry.embedding.is_not(None),
+            )
+            .order_by(dist_expr.asc())
+            .limit(candidate_limit)
+        )
+        dense_rows = (await db.execute(dense_stmt)).all()
+        # Filter out completely unrelated memories (cosine similarity < 0.1)
+        dense_scored: list[tuple[StoryBibleEntry, float]] = []
+        for row in dense_rows:
+            sim = max(0.0, 1.0 - float(row[1]))
+            if sim >= 0.1:
+                dense_scored.append((row[0], sim))
+
+        # 2. Native PostgreSQL Full-Text Search using GIN index
+        tsv_expr = func.to_tsvector(
+            "english",
+            func.concat(
+                func.coalesce(StoryBibleEntry.entity_name, ""),
+                " ",
+                func.coalesce(StoryBibleEntry.entity_type, ""),
+                " ",
+                func.coalesce(StoryBibleEntry.content, ""),
+            ),
+        )
+
+        words = [w for w in re.findall(r"\w+", query) if len(w) > 1]
+        if words:
+            ts_query_str = " OR ".join(words)
+        else:
+            ts_query_str = query
+
+        ts_query = func.websearch_to_tsquery("english", ts_query_str)
+        rank_expr = func.ts_rank_cd(tsv_expr, ts_query).label("rank")
+
+        sparse_stmt = (
+            select(StoryBibleEntry, rank_expr)
+            .where(
+                StoryBibleEntry.series_id == series_id,
+                tsv_expr.op("@@")(ts_query),
+            )
+            .order_by(rank_expr.desc())
+            .limit(candidate_limit)
+        )
+        sparse_rows = (await db.execute(sparse_stmt)).all()
+        sparse_scored: list[tuple[StoryBibleEntry, float]] = [
+            (row[0], float(row[1])) for row in sparse_rows
+        ]
+
+        return dense_scored, sparse_scored
+
+    async def _search_in_memory_fallback(
+        self,
+        db: AsyncSession,
+        series_id: str,
+        query: str,
+        query_vector: list[float],
+        candidate_limit: int,
+    ) -> tuple[list[tuple[StoryBibleEntry, float]], list[tuple[StoryBibleEntry, float]]]:
+        """Fallback candidate scoring for SQLite / non-PostgreSQL testing environments."""
+        stmt = select(StoryBibleEntry).where(StoryBibleEntry.series_id == series_id)
+        all_entries = (await db.scalars(stmt)).all()
+
+        dense_scored: list[tuple[StoryBibleEntry, float]] = []
+        for entry in all_entries:
+            if entry.embedding:
+                sim = cosine_similarity(query_vector, entry.embedding)
+                if sim >= 0.1:
+                    dense_scored.append((entry, sim))
+        dense_scored.sort(key=lambda x: x[1], reverse=True)
+
+        query_tokens = set(query.lower().split())
+        sparse_scored: list[tuple[StoryBibleEntry, float]] = []
+        for entry in all_entries:
+            entry_text = f"{entry.entity_name} {entry.entity_type} {entry.content}".lower()
+            matches = sum(1 for token in query_tokens if token in entry_text)
+            if matches > 0:
+                score = matches / max(1, len(query_tokens))
+                sparse_scored.append((entry, score))
+        sparse_scored.sort(key=lambda x: x[1], reverse=True)
+
+        return dense_scored[:candidate_limit], sparse_scored[:candidate_limit]
+
     async def hybrid_search(
         self,
         series_id: str,
@@ -194,13 +295,14 @@ class StoryBibleService:
         retrieval_enabled: bool | None = None,
         db: AsyncSession | None = None,
     ) -> StoryBibleSearchResponse:
-        """Perform hybrid vector + keyword retrieval with Reciprocal Rank Fusion (RRF) and reranking.
+        """Perform hybrid vector + keyword retrieval with Reciprocal Rank Fusion (RRF) and continuity reranking.
 
         Reliability Requirements:
         - Never silently treats retrieval failure as empty results.
-        - Explicitly distinguishes RETRIEVAL_DISABLED vs RETRIEVAL_EMPTY vs RETRIEVAL_SUCCESS.
+        - Directly executes pgvector and PostgreSQL FTS inside the database when PostgreSQL is active.
+        - Falls back gracefully to in-memory evaluation only on SQLite test setups.
+        - Combines ranks via standard Reciprocal Rank Fusion (k=60).
         """
-        # 1. Check feature flag (ablation)
         if not self.is_retrieval_enabled(retrieval_enabled):
             logger.info(f"Story Bible retrieval disabled by feature flag for series '{series_id}'.")
             return StoryBibleSearchResponse(
@@ -217,17 +319,41 @@ class StoryBibleService:
             should_close = True
 
         try:
-            # 2. Query Embedding
+            # 1. Query Embedding
             try:
                 query_vector = await self.embedding_provider.embed_text(query)
             except Exception as exc:
                 raise StoryBibleRetrievalError("Embedding service failed during query encoding.", str(exc)) from exc
 
-            # 3. Fetch candidates for this series only (Series Isolation)
-            query_stmt = select(StoryBibleEntry).where(StoryBibleEntry.series_id == series_id)
-            all_entries = (await db.scalars(query_stmt)).all()
+            # 2. Fetch candidate lists from DB using appropriate dialect engine
+            candidate_limit = max(limit * 3, 15)
+            is_postgres = False
+            try:
+                bind = db.get_bind()
+                if bind is not None and getattr(bind.dialect, "name", "") == "postgresql":
+                    is_postgres = True
+            except Exception:
+                if not str(settings.DATABASE_URL).startswith("sqlite"):
+                    is_postgres = True
 
-            if not all_entries:
+            if is_postgres:
+                dense_scored, sparse_scored = await self._search_postgres(
+                    db=db,
+                    series_id=series_id,
+                    query=query,
+                    query_vector=query_vector,
+                    candidate_limit=candidate_limit,
+                )
+            else:
+                dense_scored, sparse_scored = await self._search_in_memory_fallback(
+                    db=db,
+                    series_id=series_id,
+                    query=query,
+                    query_vector=query_vector,
+                    candidate_limit=candidate_limit,
+                )
+
+            if not dense_scored and not sparse_scored:
                 return StoryBibleSearchResponse(
                     status="RETRIEVAL_EMPTY",
                     query=query,
@@ -235,47 +361,40 @@ class StoryBibleService:
                     retrieval_enabled=True,
                 )
 
-            # 4. Dense Vector Scoring
-            dense_scored: list[tuple[StoryBibleEntry, float]] = []
-            for entry in all_entries:
-                if entry.embedding:
-                    sim = cosine_similarity(query_vector, entry.embedding)
-                    dense_scored.append((entry, sim))
-            dense_scored.sort(key=lambda x: x[1], reverse=True)
-
-            # 5. Sparse Keyword Scoring
-            query_tokens = set(query.lower().split())
-            sparse_scored: list[tuple[StoryBibleEntry, float]] = []
-            for entry in all_entries:
-                entry_text = f"{entry.entity_name} {entry.content}".lower()
-                matches = sum(1 for token in query_tokens if token in entry_text)
-                score = matches / max(1, len(query_tokens))
-                sparse_scored.append((entry, score))
-            sparse_scored.sort(key=lambda x: x[1], reverse=True)
-
-            # 6. Reciprocal Rank Fusion (RRF)
+            # 3. Reciprocal Rank Fusion (RRF) with standard k = 60
             rrf_scores: dict[str, float] = {}
             k_rrf = 60.0
+            entry_map: dict[str, StoryBibleEntry] = {}
 
             for rank, (entry, _) in enumerate(dense_scored):
+                entry_map[entry.id] = entry
                 rrf_scores[entry.id] = rrf_scores.get(entry.id, 0.0) + (alpha * (1.0 / (k_rrf + rank + 1)))
 
             for rank, (entry, _) in enumerate(sparse_scored):
+                entry_map[entry.id] = entry
                 rrf_scores[entry.id] = rrf_scores.get(entry.id, 0.0) + ((1.0 - alpha) * (1.0 / (k_rrf + rank + 1)))
 
-            # Map entries
-            entry_map = {e.id: e for e in all_entries}
-
-            # 7. Reranking Service: Boost characters and open plot threads for audio continuity
-            ranked_candidates = []
+            # 4. Continuity & Entity Relevance Reranking
+            ranked_candidates: list[tuple[StoryBibleEntry, float]] = []
             for entry_id, score in rrf_scores.items():
                 entry = entry_map[entry_id]
-                # Continuity boost
                 multiplier = 1.0
+
+                # Type-based continuity weighting
                 if entry.entity_type == "character":
                     multiplier = 1.2
                 elif entry.entity_type == "open_plot_thread":
                     multiplier = 1.25
+                elif entry.entity_type == "rule":
+                    multiplier = 1.15
+
+                # Metadata-based importance weighting if present
+                meta = entry.metadata_json or {}
+                imp = meta.get("importance")
+                if imp in ("high", "critical", 5, 4):
+                    multiplier *= 1.15
+                elif imp in ("low", 1):
+                    multiplier *= 0.9
 
                 normalized_score = min(1.0, score * 50.0 * multiplier)
                 ranked_candidates.append((entry, normalized_score))
@@ -306,6 +425,9 @@ class StoryBibleService:
         finally:
             if should_close:
                 await db.close()
+
+
+story_bible_service = StoryBibleService()
 
 
 story_bible_service = StoryBibleService()

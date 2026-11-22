@@ -63,9 +63,12 @@ async def planner_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[s
 
     try:
         from app.services.story_bible import story_bible_service
+
+        char_hint_str = " ".join(characters_hint) if characters_hint else ""
+        retrieval_query = f"{premise} {char_hint_str}".strip()
         search_res = await story_bible_service.hybrid_search(
             series_id=series_id,
-            query=premise,
+            query=retrieval_query,
             limit=4,
             retrieval_enabled=retrieval_override,
         )

@@ -9,11 +9,20 @@ if TYPE_CHECKING:
     from app.models.series import Series
 
 
+try:
+    from pgvector.sqlalchemy import Vector
+    _VectorComparator = Vector.comparator_factory
+except ImportError:
+    _VectorComparator = None
+
+
 class SafeVector(TypeDecorator):
     """Dialect-safe Vector type: uses native pgvector.Vector(768) on PostgreSQL and JSON on SQLite."""
 
     impl = sa.JSON
     cache_ok = True
+    if _VectorComparator is not None:
+        comparator_factory = _VectorComparator
 
     def load_dialect_impl(self, dialect: sa.engine.Dialect) -> sa.types.TypeEngine[Any]:
         if dialect.name == "postgresql":
