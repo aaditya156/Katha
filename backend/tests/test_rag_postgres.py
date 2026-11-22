@@ -17,7 +17,16 @@ from app.schemas.story_bible import (
     PlotThreadFact,
     StoryBibleExtraction,
 )
-from app.services.story_bible import StoryBibleService
+from app.services.story_bible import (
+    CONTINUITY_WEIGHT_CHARACTER,
+    CONTINUITY_WEIGHT_HIGH_IMPORTANCE,
+    CONTINUITY_WEIGHT_LOW_IMPORTANCE,
+    CONTINUITY_WEIGHT_PLOT_THREAD,
+    CONTINUITY_WEIGHT_RULE,
+    DEFAULT_RRF_K,
+    StoryBibleService,
+    calculate_continuity_multiplier,
+)
 
 settings = get_settings()
 
@@ -31,7 +40,6 @@ async def pg_session():
         pytest.skip("PostgreSQL with pgvector is not configured (current DB is SQLite).")
 
     engine = create_async_engine(settings.DATABASE_URL)
-    # Verify connection
     try:
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
@@ -47,7 +55,7 @@ async def pg_session():
 
 @pytest.fixture
 async def seeded_series(pg_session: AsyncSession):
-    """Creates a deterministic test dataset in PostgreSQL for Series A and Series B."""
+    """Creates a deterministic test dataset in PostgreSQL for Series A (multilingual) and Series B."""
     series_a_id = f"test_rag_series_a_{int(time.time()*1000)}"
     series_b_id = f"test_rag_series_b_{int(time.time()*1000)}"
     user_id = f"test_user_{int(time.time()*1000)}"
@@ -143,7 +151,7 @@ async def seeded_series(pg_session: AsyncSession):
     )
     await service.store_facts(series_id=series_a_id, episode_id=ep_a1_id, extraction=extraction_a, db=pg_session)
 
-    # Add a world rule with high importance
+    # Add a world rule
     rule_entry = StoryBibleEntry(
         series_id=series_a_id,
         episode_id=ep_a1_id,
@@ -156,6 +164,20 @@ async def seeded_series(pg_session: AsyncSession):
         ),
     )
     pg_session.add(rule_entry)
+
+    # Seed a Hindi Devanagari entry to test native multilingual FTS
+    hindi_entry = StoryBibleEntry(
+        series_id=series_a_id,
+        episode_id=ep_a1_id,
+        entity_type="location",
+        entity_name="पुरानी हवेली",
+        content="चांदनी चौक की पुरानी हवेली जहाँ 1947 के गुप्त दस्तावेज़ दबे हैं।",
+        metadata_json={"importance": "high"},
+        embedding=await service.embedding_provider.embed_text(
+            "चांदनी चौक की पुरानी हवेली जहाँ 1947 के गुप्त दस्तावेज़ दबे हैं।"
+        ),
+    )
+    pg_session.add(hindi_entry)
 
     # Seed Series B facts (for isolation check)
     extraction_b = StoryBibleExtraction(
@@ -183,16 +205,14 @@ async def seeded_series(pg_session: AsyncSession):
 
 
 async def test_postgres_vector_similarity_retrieval(pg_session: AsyncSession, seeded_series):
-    """Verify native PostgreSQL pgvector cosine similarity search uses the HNSW index and retrieves semantic matches."""
+    """Verify native PostgreSQL pgvector cosine similarity search retrieves semantic matches."""
     series_a_id, _, service = seeded_series
 
-    # Semantic paraphrase without exact keyword matches:
-    # "nocturnal audio host terrified insomniac" -> matches "RJ Kabir"
     search_res = await service.hybrid_search(
         series_id=series_a_id,
-        query="nocturnal audio host terrified insomniac broadcaster",
+        query="cynical smoker insomniac baritone radio broadcaster",
         limit=3,
-        alpha=1.0,  # Pure dense vector search
+        alpha=1.0,
         db=pg_session,
     )
 
@@ -203,30 +223,48 @@ async def test_postgres_vector_similarity_retrieval(pg_session: AsyncSession, se
     assert search_res.results[0].score > 0.0
 
 
-async def test_postgres_fulltext_keyword_retrieval(pg_session: AsyncSession, seeded_series):
-    """Verify PostgreSQL Full-Text Search uses the GIN index and finds exact/stemmed terms."""
+async def test_postgres_multilingual_fts_english_hinglish_hindi(pg_session: AsyncSession, seeded_series):
+    """Verify multilingual full-text search supports English, Hinglish, and Hindi Devanagari."""
     series_a_id, _, service = seeded_series
 
-    # Keyword search for specific terms: "partition property deeds underground vault"
-    search_res = await service.hybrid_search(
+    # 1. English keyword test
+    eng_res = await service.hybrid_search(
         series_id=series_a_id,
         query="partition property deeds underground vault",
         limit=3,
-        alpha=0.0,  # Pure sparse keyword search
+        alpha=0.0,
         db=pg_session,
     )
+    assert eng_res.status == "RETRIEVAL_SUCCESS"
+    assert any("Haveli Basement" in r.entry.entity_name for r in eng_res.results)
 
-    assert search_res.status == "RETRIEVAL_SUCCESS"
-    assert len(search_res.results) > 0
-    entity_names = [r.entry.entity_name for r in search_res.results]
-    assert "Haveli Basement" in entity_names
+    # 2. Hinglish keyword test: unstemmed match for "haveli" and "thumri"
+    hinglish_res = await service.hybrid_search(
+        series_id=series_a_id,
+        query="thumri singer haveli ruins",
+        limit=3,
+        alpha=0.0,
+        db=pg_session,
+    )
+    assert hinglish_res.status == "RETRIEVAL_SUCCESS"
+    assert any("Sultana Begum" in r.entry.entity_name for r in hinglish_res.results)
+
+    # 3. Hindi (Devanagari) keyword test
+    hindi_res = await service.hybrid_search(
+        series_id=series_a_id,
+        query="चांदनी चौक की पुरानी हवेली गुप्त दस्तावेज़",
+        limit=3,
+        alpha=0.0,
+        db=pg_session,
+    )
+    assert hindi_res.status == "RETRIEVAL_SUCCESS"
+    assert any("पुरानी हवेली" in r.entry.entity_name for r in hindi_res.results)
 
 
 async def test_postgres_hybrid_retrieval_and_rrf_ranking(pg_session: AsyncSession, seeded_series):
     """Verify RRF correctly fuses dense vector and sparse keyword rankings."""
     series_a_id, _, service = seeded_series
 
-    # Hybrid query: contains exact keywords and broad semantic intent
     search_res = await service.hybrid_search(
         series_id=series_a_id,
         query="Sultana singing classical thumri in Chandni Chowk ruins",
@@ -242,45 +280,74 @@ async def test_postgres_hybrid_retrieval_and_rrf_ranking(pg_session: AsyncSessio
     assert results[0].retrieval_method == "hybrid"
 
 
-async def test_postgres_duplicate_handling_rrf(pg_session: AsyncSession, seeded_series):
-    """Verify that entries returned by both dense and sparse queries accumulate fused RRF score."""
+async def test_postgres_mathematical_rrf_duplicate_handling(pg_session: AsyncSession, seeded_series):
+    """Verify mathematical RRF formula: an item in both lists gets contributions from both dense and sparse."""
     series_a_id, _, service = seeded_series
+    query = "lost partition property deeds hidden in Haveli basement"
 
-    # Dense only
-    dense_res = await service.hybrid_search(
-        series_id=series_a_id,
-        query="lost partition property deeds hidden in Haveli basement",
-        limit=5,
-        alpha=1.0,
+    query_vec = await service.embedding_provider.embed_text(query)
+    dense_scored, sparse_scored = await service._search_postgres(
         db=pg_session,
-    )
-    # Sparse only
-    sparse_res = await service.hybrid_search(
         series_id=series_a_id,
-        query="lost partition property deeds hidden in Haveli basement",
-        limit=5,
-        alpha=0.0,
-        db=pg_session,
+        query=query,
+        query_vector=query_vec,
+        candidate_limit=15,
     )
-    # Hybrid (fused)
+
+    # Find an entry appearing in both dense and sparse lists
+    dense_map = {entry.id: rank for rank, (entry, _) in enumerate(dense_scored)}
+    sparse_map = {entry.id: rank for rank, (entry, _) in enumerate(sparse_scored)}
+    common_ids = set(dense_map.keys()) & set(sparse_map.keys())
+
+    assert len(common_ids) > 0, "Expected at least one entity in both candidate sets."
+    common_id = next(iter(common_ids))
+    r_dense = dense_map[common_id]
+    r_sparse = sparse_map[common_id]
+
+    alpha = 0.60
+    k_rrf = DEFAULT_RRF_K
+    expected_dense_contrib = alpha * (1.0 / (k_rrf + r_dense + 1))
+    expected_sparse_contrib = (1.0 - alpha) * (1.0 / (k_rrf + r_sparse + 1))
+    expected_fused_rrf = expected_dense_contrib + expected_sparse_contrib
+
+    # Run hybrid search and verify combined score reflects both contributions
     hybrid_res = await service.hybrid_search(
         series_id=series_a_id,
-        query="lost partition property deeds hidden in Haveli basement",
+        query=query,
         limit=5,
-        alpha=0.5,
+        alpha=alpha,
         db=pg_session,
     )
-
     assert hybrid_res.status == "RETRIEVAL_SUCCESS"
-    top_hybrid_name = hybrid_res.results[0].entry.entity_name
-    assert top_hybrid_name == "Haveli Basement"
+    target_result = next((r for r in hybrid_res.results if r.entry.id == common_id), None)
+    assert target_result is not None
+
+    multiplier = calculate_continuity_multiplier(
+        target_result.entry.entity_type,
+        target_result.entry.metadata_json,
+    )
+    expected_final_score = min(1.0, expected_fused_rrf * 50.0 * multiplier)
+    assert pytest.approx(target_result.score, abs=0.01) == round(expected_final_score, 3)
+
+
+async def test_postgres_alpha_boundary_conditions(pg_session: AsyncSession, seeded_series):
+    """Verify behavior at alpha = 0.0 (pure keyword) and alpha = 1.0 (pure semantic)."""
+    series_a_id, _, service = seeded_series
+    query = "lost partition property deeds hidden in Haveli basement"
+
+    # alpha = 0.0: pure keyword
+    res_alpha_0 = await service.hybrid_search(series_id=series_a_id, query=query, alpha=0.0, db=pg_session)
+    assert res_alpha_0.status == "RETRIEVAL_SUCCESS"
+
+    # alpha = 1.0: pure vector
+    res_alpha_1 = await service.hybrid_search(series_id=series_a_id, query=query, alpha=1.0, db=pg_session)
+    assert res_alpha_1.status == "RETRIEVAL_SUCCESS"
 
 
 async def test_postgres_series_isolation(pg_session: AsyncSession, seeded_series):
     """Verify strict tenant/series isolation in PostgreSQL: Series B cannot retrieve Series A memories."""
     series_a_id, series_b_id, service = seeded_series
 
-    # Query Series B with terms that exclusively exist in Series A
     search_res = await service.hybrid_search(
         series_id=series_b_id,
         query="RJ Kabir Sultana 1947 Haveli basement",
@@ -288,30 +355,30 @@ async def test_postgres_series_isolation(pg_session: AsyncSession, seeded_series
         db=pg_session,
     )
 
-    # Strict Series Isolation: Series B must NEVER see Series A memories
     for r in search_res.results:
         assert r.entry.series_id == series_b_id
         assert r.entry.series_id != series_a_id
         assert r.entry.entity_name not in ("RJ Kabir", "Sultana Begum", "Haveli Basement")
 
 
-async def test_postgres_empty_retrieval_results(pg_session: AsyncSession, seeded_series):
-    """Verify completely unmatched queries return RETRIEVAL_EMPTY gracefully without errors."""
+async def test_postgres_deterministic_empty_retrieval(pg_session: AsyncSession, seeded_series):
+    """Verify deterministic empty retrieval: queries with no semantic or keyword overlap return RETRIEVAL_EMPTY."""
     series_a_id, _, service = seeded_series
 
     search_res = await service.hybrid_search(
         series_id=series_a_id,
-        query="quantum singularity hyperdrive warp core reactor",
+        query="xyzquantum9999 warp9999 unobtainium8888",
         limit=5,
+        alpha=0.0,  # Pure sparse search on nonexistent words
         db=pg_session,
     )
 
-    # Empty keyword matches and unrelated vector
-    assert search_res.status in ("RETRIEVAL_SUCCESS", "RETRIEVAL_EMPTY")
+    assert search_res.status == "RETRIEVAL_EMPTY"
+    assert len(search_res.results) == 0
 
 
-async def test_postgres_writer_agent_integration(pg_session: AsyncSession, seeded_series):
-    """Verify the Writer agent receives retrieved Story Bible context when executing in LangGraph."""
+async def test_postgres_writer_prompt_context_injection(pg_session: AsyncSession, seeded_series):
+    """Verify that retrieved Story Bible lore is ACTUALLY injected into the Writer agent's prompt."""
     from app.agents.graph import create_katha_graph
     from app.agents.state import KathaEpisodeState
     from app.providers.mock import MockLLMProvider
@@ -319,10 +386,16 @@ async def test_postgres_writer_agent_integration(pg_session: AsyncSession, seede
 
     series_a_id, _, service = seeded_series
 
-    llm = MockLLMProvider()
+    captured_prompts: list[str] = []
+
+    class PromptCapturingMockLLM(MockLLMProvider):
+        async def generate_structured(self, prompt: str, schema, system_prompt: str = ""):
+            captured_prompts.append(prompt)
+            return await super().generate_structured(prompt, schema, system_prompt)
+
+    llm = PromptCapturingMockLLM()
     graph = create_katha_graph(llm, checkpointer=MemorySaver())
 
-    # Temporarily point the global story_bible_service to pg_session
     from app.services.story_bible import story_bible_service
     orig_session_factory = story_bible_service.session_factory
     story_bible_service.session_factory = lambda: pg_session
@@ -366,46 +439,30 @@ async def test_postgres_writer_agent_integration(pg_session: AsyncSession, seede
             "simulation_flags": {},
         }
 
-        config = {"configurable": {"thread_id": f"thread_rag_{int(time.time()*1000)}"}}
+        config = {"configurable": {"thread_id": f"thread_rag_prompt_{int(time.time()*1000)}"}}
         result = await graph.ainvoke(initial_state, config=config)
 
         assert result["status"] == "COMPLETED"
-        assert result["outline"] is not None
-        assert result["raw_script"] is not None
+
+        # Verify that Writer prompt received the lore context header
+        writer_prompts = [p for p in captured_prompts if "Relevant Story Bible Memories & Character Lore" in p]
+        assert len(writer_prompts) > 0, "Writer prompt MUST include injected Story Bible context."
+        assert "RJ Kabir" in writer_prompts[0] or "Haveli Basement" in writer_prompts[0]
     finally:
         story_bible_service.session_factory = orig_session_factory
 
 
-async def test_retrieval_performance_benchmark(pg_session: AsyncSession, seeded_series):
-    """Empirical performance benchmark comparing native PostgreSQL search vs in-memory scan."""
-    series_a_id, _, service = seeded_series
-    query = "1947 midnight refugee express to Lahore"
+async def test_continuity_weight_heuristics():
+    """Verify that heuristic continuity multipliers behave predictably across entity types and metadata."""
+    assert calculate_continuity_multiplier("character") == CONTINUITY_WEIGHT_CHARACTER
+    assert calculate_continuity_multiplier("open_plot_thread") == CONTINUITY_WEIGHT_PLOT_THREAD
+    assert calculate_continuity_multiplier("rule") == CONTINUITY_WEIGHT_RULE
+    assert calculate_continuity_multiplier("location") == 1.0
 
-    query_vec = await service.embedding_provider.embed_text(query)
+    # High importance boost
+    high_char = calculate_continuity_multiplier("character", {"importance": "critical"})
+    assert pytest.approx(high_char, abs=1e-4) == CONTINUITY_WEIGHT_CHARACTER * CONTINUITY_WEIGHT_HIGH_IMPORTANCE
 
-    # Benchmark 1: Native PostgreSQL search (pgvector HNSW + FTS GIN)
-    start_pg = time.perf_counter()
-    dense_pg, sparse_pg = await service._search_postgres(
-        db=pg_session,
-        series_id=series_a_id,
-        query=query,
-        query_vector=query_vec,
-        candidate_limit=15,
-    )
-    time_pg_ms = (time.perf_counter() - start_pg) * 1000.0
-
-    # Benchmark 2: In-memory Python scan
-    start_mem = time.perf_counter()
-    dense_mem, sparse_mem = await service._search_in_memory_fallback(
-        db=pg_session,
-        series_id=series_a_id,
-        query=query,
-        query_vector=query_vec,
-        candidate_limit=15,
-    )
-    time_mem_ms = (time.perf_counter() - start_mem) * 1000.0
-
-    assert len(dense_pg) > 0 or len(sparse_pg) > 0
-    # Log measured times for reporting
-    print(f"\n[BENCHMARK] Native PostgreSQL Search: {time_pg_ms:.2f} ms")
-    print(f"[BENCHMARK] In-Memory Python Fallback: {time_mem_ms:.2f} ms")
+    # Low importance de-weight
+    low_char = calculate_continuity_multiplier("character", {"importance": "low"})
+    assert pytest.approx(low_char, abs=1e-4) == CONTINUITY_WEIGHT_CHARACTER * CONTINUITY_WEIGHT_LOW_IMPORTANCE

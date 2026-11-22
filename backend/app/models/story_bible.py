@@ -80,5 +80,12 @@ class StoryBibleEntry(Base, UUIDMixin, TimestampMixin):
         nullable=True,
     )
 
+    # Multilingual full-text search vector (generated and indexed on PostgreSQL)
+    search_vector: Mapped[Any | None] = mapped_column(
+        sa.Text,
+        server_default=sa.FetchedValue(),
+        nullable=True,
+    )
+
     # Relationship
     series: Mapped["Series"] = relationship("Series", back_populates="story_bible_entries")

@@ -220,3 +220,4 @@ Measured on the PostgreSQL container (`katha_postgres`) using `test_retrieval_pe
 1. **Cross-Encoder Reranker**: Intentionally deferred as instructed. If domain-specific fine-tuned reranking is needed in the future, a cross-encoder model can be evaluated as an optional sidecar.
 2. **Multi-Language Stemming**: PostgreSQL full-text search currently uses the `'english'` dictionary. In Phase 5 (Advanced Localization), dedicated dictionaries or character n-gram / unigram tokenizers for Hindi / Hinglish text can be configured.
 3. **Queue-Based Asynchronous Pipeline**: The LangGraph pipeline and TTS execution still run in the FastAPI process; background worker isolation is scheduled for Phase 4 (RabbitMQ + Celery).
+

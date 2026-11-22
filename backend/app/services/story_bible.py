@@ -21,6 +21,39 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
+# --- Heuristic Continuity Weights ---
+# Domain-informed narrative priority multipliers for audio drama production.
+# Note: These are rule-based heuristics designed to ensure character voice consistency,
+# active mystery hooks, and world rules are prioritized during generation,
+# NOT empirically optimized or machine-learned weights.
+DEFAULT_RRF_K: float = 60.0
+CONTINUITY_WEIGHT_CHARACTER: float = 1.08       # Prioritizes character vocal traits & psychology
+CONTINUITY_WEIGHT_PLOT_THREAD: float = 1.10     # Prioritizes unresolved serial hooks & cliffhangers
+CONTINUITY_WEIGHT_RULE: float = 1.05            # Prioritizes world constraints & canon laws
+CONTINUITY_WEIGHT_HIGH_IMPORTANCE: float = 1.05  # Priority boost for critical/high metadata tags
+CONTINUITY_WEIGHT_LOW_IMPORTANCE: float = 0.95   # De-weights background/trivial lore
+
+
+def calculate_continuity_multiplier(entity_type: str, metadata: dict[str, Any] | None = None) -> float:
+    """Compute the heuristic continuity multiplier for a Story Bible entry."""
+    multiplier = 1.0
+    if entity_type == "character":
+        multiplier = CONTINUITY_WEIGHT_CHARACTER
+    elif entity_type == "open_plot_thread":
+        multiplier = CONTINUITY_WEIGHT_PLOT_THREAD
+    elif entity_type == "rule":
+        multiplier = CONTINUITY_WEIGHT_RULE
+
+    meta = metadata or {}
+    imp = meta.get("importance")
+    if imp in ("high", "critical", 5, 4):
+        multiplier *= CONTINUITY_WEIGHT_HIGH_IMPORTANCE
+    elif imp in ("low", 1):
+        multiplier *= CONTINUITY_WEIGHT_LOW_IMPORTANCE
+
+    return multiplier
+
+
 class StoryBibleRetrievalError(KathaException):
     """Raised when story bible retrieval fails unexpectedly."""
 
@@ -217,32 +250,25 @@ class StoryBibleService:
             if sim >= 0.1:
                 dense_scored.append((row[0], sim))
 
-        # 2. Native PostgreSQL Full-Text Search using GIN index
-        tsv_expr = func.to_tsvector(
-            "english",
-            func.concat(
-                func.coalesce(StoryBibleEntry.entity_name, ""),
-                " ",
-                func.coalesce(StoryBibleEntry.entity_type, ""),
-                " ",
-                func.coalesce(StoryBibleEntry.content, ""),
-            ),
-        )
-
-        words = [w for w in re.findall(r"\w+", query) if len(w) > 1]
+        # 2. Native Multilingual Full-Text Search using generated search_vector and GIN index
+        words = [w.strip(".,!?:;\"'()[]{}") for w in query.split() if len(w.strip(".,!?:;\"'()[]{}")) > 1]
         if words:
             ts_query_str = " OR ".join(words)
         else:
             ts_query_str = query
 
-        ts_query = func.websearch_to_tsquery("english", ts_query_str)
-        rank_expr = func.ts_rank_cd(tsv_expr, ts_query).label("rank")
+        # Combine English (stemmed) + Simple (Hinglish/Hindi exact tokens)
+        ts_query_english = func.websearch_to_tsquery("english", ts_query_str)
+        ts_query_simple = func.websearch_to_tsquery("simple", ts_query_str)
+        ts_query = ts_query_english.op("||")(ts_query_simple)
+
+        rank_expr = func.ts_rank_cd(StoryBibleEntry.search_vector, ts_query).label("rank")
 
         sparse_stmt = (
             select(StoryBibleEntry, rank_expr)
             .where(
                 StoryBibleEntry.series_id == series_id,
-                tsv_expr.op("@@")(ts_query),
+                StoryBibleEntry.search_vector.op("@@")(ts_query),
             )
             .order_by(rank_expr.desc())
             .limit(candidate_limit)
@@ -363,39 +389,26 @@ class StoryBibleService:
 
             # 3. Reciprocal Rank Fusion (RRF) with standard k = 60
             rrf_scores: dict[str, float] = {}
-            k_rrf = 60.0
+            k_rrf = DEFAULT_RRF_K
             entry_map: dict[str, StoryBibleEntry] = {}
 
-            for rank, (entry, _) in enumerate(dense_scored):
-                entry_map[entry.id] = entry
-                rrf_scores[entry.id] = rrf_scores.get(entry.id, 0.0) + (alpha * (1.0 / (k_rrf + rank + 1)))
+            if alpha > 0.0:
+                for rank, (entry, _) in enumerate(dense_scored):
+                    entry_map[entry.id] = entry
+                    rrf_scores[entry.id] = rrf_scores.get(entry.id, 0.0) + (alpha * (1.0 / (k_rrf + rank + 1)))
 
-            for rank, (entry, _) in enumerate(sparse_scored):
-                entry_map[entry.id] = entry
-                rrf_scores[entry.id] = rrf_scores.get(entry.id, 0.0) + ((1.0 - alpha) * (1.0 / (k_rrf + rank + 1)))
+            if alpha < 1.0:
+                for rank, (entry, _) in enumerate(sparse_scored):
+                    entry_map[entry.id] = entry
+                    rrf_scores[entry.id] = rrf_scores.get(entry.id, 0.0) + ((1.0 - alpha) * (1.0 / (k_rrf + rank + 1)))
 
-            # 4. Continuity & Entity Relevance Reranking
+            # 4. Continuity & Entity Relevance Reranking using domain heuristics
             ranked_candidates: list[tuple[StoryBibleEntry, float]] = []
             for entry_id, score in rrf_scores.items():
+                if score <= 0.0:
+                    continue
                 entry = entry_map[entry_id]
-                multiplier = 1.0
-
-                # Type-based continuity weighting
-                if entry.entity_type == "character":
-                    multiplier = 1.2
-                elif entry.entity_type == "open_plot_thread":
-                    multiplier = 1.25
-                elif entry.entity_type == "rule":
-                    multiplier = 1.15
-
-                # Metadata-based importance weighting if present
-                meta = entry.metadata_json or {}
-                imp = meta.get("importance")
-                if imp in ("high", "critical", 5, 4):
-                    multiplier *= 1.15
-                elif imp in ("low", 1):
-                    multiplier *= 0.9
-
+                multiplier = calculate_continuity_multiplier(entry.entity_type, entry.metadata_json)
                 normalized_score = min(1.0, score * 50.0 * multiplier)
                 ranked_candidates.append((entry, normalized_score))
 
