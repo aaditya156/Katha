@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from typing import Any
+from app.agents.guards import generate_structured_with_guardrail
 from app.agents.state import KathaEpisodeState
 from app.core.events import event_hub
 from app.core.exceptions import LLMProviderError, SchemaValidationError
@@ -108,10 +109,12 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
                 )
 
                 try:
-                    rewritten_scene: ScriptScene = await llm.generate_structured(
+                    rewritten_scene: ScriptScene = await generate_structured_with_guardrail(
+                        llm=llm,
                         prompt=prompt,
                         schema=ScriptScene,
                         system_prompt=system_prompt,
+                        node_name="writer_revision",
                     )
                     # Enforce proper scene number
                     rewritten_scene = rewritten_scene.model_copy(update={"scene_number": orig_scene.scene_number})
@@ -123,6 +126,7 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
                         payload={"scene_number": orig_scene.scene_number, "lines_count": len(rewritten_scene.lines)},
                     )
                 except (LLMProviderError, SchemaValidationError) as exc:
+                    logger.error(f"[{episode_id}] Writer failed rewriting scene {orig_scene.scene_number}: {exc}")
                     return {
                         "status": "FAILED",
                         "current_node": "writer",
@@ -180,10 +184,12 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
     )
 
     try:
-        script: Script = await llm.generate_structured(
+        script: Script = await generate_structured_with_guardrail(
+            llm=llm,
             prompt=prompt,
             schema=Script,
             system_prompt=system_prompt,
+            node_name="writer_initial",
         )
         await event_hub.publish(
             episode_id=episode_id,
@@ -202,6 +208,7 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
             "current_node": "writer",
         }
     except (LLMProviderError, SchemaValidationError) as exc:
+        logger.error(f"[{episode_id}] Writer initial draft failed validation: {exc}")
         return {
             "status": "FAILED",
             "current_node": "writer",

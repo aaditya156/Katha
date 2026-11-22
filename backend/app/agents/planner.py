@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import logging
 from typing import Any
+from app.agents.guards import generate_structured_with_guardrail
 from app.agents.state import KathaEpisodeState
 from app.core.events import event_hub
 from app.core.exceptions import LLMProviderError, SchemaValidationError
@@ -58,7 +59,6 @@ async def planner_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[s
 
     # Retrieve relevant Story Bible memories
     story_bible_context = ""
-    sim_flags = state.get("simulation_flags", {})
     retrieval_override = sim_flags.get("retrieval_enabled")
 
     try:
@@ -77,7 +77,6 @@ async def planner_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[s
             logger.info(f"[{episode_id}] Story Bible retrieval disabled for this generation (Ablation).")
     except Exception as exc:
         logger.error(f"[{episode_id}] Story Bible retrieval error in Planner: {exc}")
-        # Never swallow retrieval failure silently
         if sim_flags.get("fail_on_retrieval_error"):
             raise
 
@@ -99,10 +98,12 @@ async def planner_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[s
     )
 
     try:
-        outline: EpisodeOutline = await llm.generate_structured(
+        outline: EpisodeOutline = await generate_structured_with_guardrail(
+            llm=llm,
             prompt=prompt,
             schema=EpisodeOutline,
             system_prompt=system_prompt,
+            node_name="planner",
         )
         await event_hub.publish(
             episode_id=episode_id,
@@ -110,8 +111,8 @@ async def planner_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[s
             node="planner",
             payload={
                 "title": outline.title,
-                "scene_count": len(outline.scenes),
-                "character_count": len(outline.characters),
+                "scenes_count": len(outline.scenes),
+                "characters": [c.name for c in outline.characters],
             },
         )
         return {
@@ -120,14 +121,9 @@ async def planner_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[s
             "current_node": "planner",
         }
     except (LLMProviderError, SchemaValidationError) as exc:
-        err_record = GraphErrorRecord(
-            node="planner",
-            error=str(exc),
-            timestamp=datetime.now(timezone.utc).isoformat(),
-            recoverable=False,
-        )
+        logger.error(f"[{episode_id}] Planner node failed validation after guardrail retries: {exc}")
         return {
             "status": "FAILED",
             "current_node": "planner",
-            "errors": [err_record],
+            "errors": [GraphErrorRecord(node="planner", error=str(exc), timestamp=datetime.now(timezone.utc).isoformat(), recoverable=False)],
         }

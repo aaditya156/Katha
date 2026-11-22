@@ -206,3 +206,108 @@ async def test_job_idempotency_prevents_duplicate_runs() -> None:
     second_call = launch_background_generation(test_ep_id, llm)
     assert second_call is False
 
+
+
+@pytest.mark.asyncio
+async def test_structured_output_guardrail_retry_recovery() -> None:
+    """Validate that structured generation guardrail recovers from transient validation errors."""
+    from app.agents.guards import generate_structured_with_guardrail
+    from app.schemas.outline import EpisodeOutline
+
+    # Fails 1st attempt with SchemaValidationError, succeeds on 2nd attempt
+    llm = MockLLMProvider(transient_schema_errors=1)
+    result = await generate_structured_with_guardrail(
+        llm=llm,
+        prompt="Generate an outline",
+        schema=EpisodeOutline,
+        max_retries=2,
+        node_name="test_guardrail",
+    )
+    assert isinstance(result, EpisodeOutline)
+    assert result.title != ""
+    assert len(result.scenes) >= 1
+    assert llm._schema_error_count == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_output_guardrail_retry_exhaustion() -> None:
+    """Validate that persistent schema errors raise SchemaValidationError after exhausting retries."""
+    from app.agents.guards import generate_structured_with_guardrail
+    from app.core.exceptions import SchemaValidationError
+    from app.schemas.outline import EpisodeOutline
+
+    # Consistently fails with schema_error
+    llm = MockLLMProvider(mode="schema_error")
+    with pytest.raises(SchemaValidationError) as exc_info:
+        await generate_structured_with_guardrail(
+            llm=llm,
+            prompt="Generate an outline",
+            schema=EpisodeOutline,
+            max_retries=2,
+            node_name="test_guardrail_exhaustion",
+        )
+    assert "Exhausted 3 attempts" in str(exc_info.value) or "missing required" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_critic_targeted_feedback_and_scoring(initial_test_state: KathaEpisodeState) -> None:
+    """Validate that Critic generates per-scene feedback and identifies exact failing scene indices."""
+    from app.agents.critic import critic_node
+    from app.schemas.outline import EpisodeOutline, SceneOutline, DramaticBeat, CharacterAppearance
+    from app.schemas.script import Script, ScriptScene, ScriptLine
+
+    test_outline = EpisodeOutline(
+        title="Test Story",
+        logline="A test logline",
+        target_language="hinglish",
+        estimated_duration_minutes=5,
+        characters=[CharacterAppearance(name="A", role="protagonist", vocal_archetype="baritone", emotional_state="calm")],
+        scenes=[
+            SceneOutline(
+                scene_number=1,
+                heading="INT. SCENE 1",
+                atmosphere_soundscape="Rain",
+                characters_present=["A"],
+                dramatic_objective="Objective 1",
+                beats=[DramaticBeat(beat_number=1, description="Beat 1", conflict_type="internal", stakes="high")],
+            )
+        ],
+        cliffhanger_or_resolution="Resolution",
+    )
+
+    test_script = Script(
+        title="Test Story",
+        scenes=[
+            ScriptScene(
+                scene_number=1,
+                heading="INT. SCENE 1",
+                atmosphere_soundscape="Rain",
+                dramatic_objective="Objective 1",
+                characters_present=["A"],
+                lines=[ScriptLine(id="l1", line_number=1, character_name="A", text="Hello")],
+            ),
+            ScriptScene(
+                scene_number=2,
+                heading="INT. SCENE 2",
+                atmosphere_soundscape="Thunder",
+                dramatic_objective="Objective 2",
+                characters_present=["B"],
+                lines=[ScriptLine(id="l2", line_number=1, character_name="B", text="World")],
+            ),
+        ],
+        total_lines=2,
+    )
+
+    state = dict(initial_test_state)
+    state["outline"] = test_outline
+    state["raw_script"] = test_script
+
+    # Critic fails scene 2 specifically
+    llm = MockLLMProvider(critic_failing_scenes=[2], force_critic_score=6.0)
+    critic_result = await critic_node(state, llm)
+
+    assert critic_result["critic_score"] == 6.0
+    assert 2 in critic_result["failing_scenes"]
+    assert 1 not in critic_result["failing_scenes"]
+    assert critic_result["current_critique"].passed is False
+    assert len(critic_result["current_critique"].scene_critiques) == 2

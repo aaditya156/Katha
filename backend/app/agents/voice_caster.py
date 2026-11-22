@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from typing import Any
+from app.agents.guards import generate_structured_with_guardrail
 from app.agents.state import KathaEpisodeState
 from app.core.events import event_hub
 from app.core.exceptions import LLMProviderError, SchemaValidationError
@@ -76,10 +77,12 @@ async def voice_caster_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> d
     )
 
     try:
-        cast_script: CastScript = await llm.generate_structured(
+        cast_script: CastScript = await generate_structured_with_guardrail(
+            llm=llm,
             prompt=prompt,
             schema=CastScript,
             system_prompt=system_prompt,
+            node_name="voice_caster",
         )
         await event_hub.publish(
             episode_id=episode_id,
@@ -96,9 +99,9 @@ async def voice_caster_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> d
             "current_node": "voice_caster",
         }
     except (LLMProviderError, SchemaValidationError) as exc:
+        logger.error(f"[{episode_id}] Voice Caster node failed validation: {exc}")
         return {
             "status": "FAILED",
             "current_node": "voice_caster",
             "errors": [GraphErrorRecord(node="voice_caster", error=str(exc), timestamp=datetime.now(timezone.utc).isoformat(), recoverable=False)],
         }
-

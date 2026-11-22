@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from typing import Any
+from app.agents.guards import generate_structured_with_guardrail
 from app.agents.state import KathaEpisodeState
 from app.core.events import event_hub
 from app.core.exceptions import LLMProviderError, SchemaValidationError
@@ -82,10 +83,12 @@ async def localizer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict
     )
 
     try:
-        localized: LocalizedScript = await llm.generate_structured(
+        localized: LocalizedScript = await generate_structured_with_guardrail(
+            llm=llm,
             prompt=prompt,
             schema=LocalizedScript,
             system_prompt=system_prompt,
+            node_name="localizer",
         )
         await event_hub.publish(
             episode_id=episode_id,
@@ -99,13 +102,13 @@ async def localizer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict
         )
         return {
             "localized_script": localized,
-            "status": "LOCALIZED",
+            "status": "LOCALIZATION_COMPLETED",
             "current_node": "localizer",
         }
     except (LLMProviderError, SchemaValidationError) as exc:
+        logger.error(f"[{episode_id}] Localizer node failed validation: {exc}")
         return {
             "status": "FAILED",
             "current_node": "localizer",
             "errors": [GraphErrorRecord(node="localizer", error=str(exc), timestamp=datetime.now(timezone.utc).isoformat(), recoverable=False)],
         }
-

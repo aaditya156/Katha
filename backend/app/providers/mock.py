@@ -40,11 +40,14 @@ class MockLLMProvider(BaseLLMProvider):
         delay_seconds: float = 0.0,
         critic_failing_scenes: list[int] | None = None,
         force_critic_score: float | None = None,
+        transient_schema_errors: int = 0,
     ) -> None:
         self.mode = mode
         self.delay_seconds = delay_seconds
         self.critic_failing_scenes = critic_failing_scenes or []
         self.force_critic_score = force_critic_score
+        self.transient_schema_errors = transient_schema_errors
+        self._schema_error_count = 0
 
     async def generate_structured(
         self,
@@ -54,6 +57,14 @@ class MockLLMProvider(BaseLLMProvider):
     ) -> T:
         if self.delay_seconds > 0:
             await asyncio.sleep(self.delay_seconds)
+
+        if self.transient_schema_errors > 0 and self._schema_error_count < self.transient_schema_errors:
+            self._schema_error_count += 1
+            raise SchemaValidationError(
+                schema.__name__,
+                raw_output="{'invalid': true}",
+                error_detail=f"Simulated transient validation error (attempt {self._schema_error_count})",
+            )
 
         if self.mode == "timeout":
             raise LLMProviderError("mock", "Request timed out after 30.0s", "TimeoutError")

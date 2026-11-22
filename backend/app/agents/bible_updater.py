@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 import logging
 from typing import Any
+from app.agents.guards import generate_structured_with_guardrail
 from app.agents.state import KathaEpisodeState
 from app.core.events import event_hub
 from app.core.exceptions import LLMProviderError, SchemaValidationError
@@ -62,10 +63,12 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
     )
 
     try:
-        extraction: StoryBibleExtraction = await llm.generate_structured(
+        extraction: StoryBibleExtraction = await generate_structured_with_guardrail(
+            llm=llm,
             prompt=prompt,
             schema=StoryBibleExtraction,
             system_prompt=system_prompt,
+            node_name="bible_updater",
         )
 
         # Persist structured facts into database with deduplication and vector embeddings
@@ -104,28 +107,23 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
             event_type="bible_updated",
             node="bible_updater",
             payload={
-                "summary": extraction.episode_synopsis,
+                "episode_number": episode_num,
+                "synopsis": extraction.episode_synopsis,
                 "saved_facts_count": len(saved_entries),
-                "open_threads_count": len(extraction.open_plot_threads),
             },
         )
-        await event_hub.publish(
-            episode_id=episode_id,
-            event_type="node_completed",
-            node="bible_updater",
-            payload={"summary": extraction.episode_synopsis},
-        )
+
         await event_hub.publish(
             episode_id=episode_id,
             event_type="pipeline_completed",
-            node="pipeline",
             payload={
-                "message": "Episode pipeline generation completed successfully.",
+                "episode_id": episode_id,
+                "title": cast_script.title,
+                "total_scenes": len(cast_script.scenes),
                 "total_lines": cast_script.total_lines,
-                "critic_score": state.get("critic_score", 8.0),
-                "revisions_used": state.get("revision_count", 0),
             },
         )
+
         return {
             "bible_updates": bible_updates,
             "story_bible_extraction": extraction,
@@ -133,6 +131,7 @@ async def bible_updater_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> 
             "current_node": "bible_updater",
         }
     except (LLMProviderError, SchemaValidationError) as exc:
+        logger.error(f"[{episode_id}] Bible Updater node failed validation: {exc}")
         return {
             "status": "FAILED",
             "current_node": "bible_updater",

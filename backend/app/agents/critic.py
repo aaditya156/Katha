@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import json
 import logging
 from typing import Any
+from app.agents.guards import generate_structured_with_guardrail
 from app.agents.state import KathaEpisodeState
 from app.core.events import event_hub
 from app.core.exceptions import LLMProviderError, SchemaValidationError
@@ -72,13 +73,15 @@ async def critic_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
     )
 
     try:
-        critique: CritiqueReport = await llm.generate_structured(
+        critique: CritiqueReport = await generate_structured_with_guardrail(
+            llm=llm,
             prompt=prompt,
             schema=CritiqueReport,
             system_prompt=system_prompt,
+            node_name="critic",
         )
 
-        failing = critique.failing_scene_numbers or [
+        failing = list(critique.failing_scene_numbers) if critique.failing_scene_numbers else [
             sc.scene_number for sc in critique.scene_critiques if not sc.passed
         ]
 
@@ -106,9 +109,9 @@ async def critic_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
             "current_node": "critic",
         }
     except (LLMProviderError, SchemaValidationError) as exc:
+        logger.error(f"[{episode_id}] Critic node failed validation: {exc}")
         return {
             "status": "FAILED",
             "current_node": "critic",
             "errors": [GraphErrorRecord(node="critic", error=str(exc), timestamp=datetime.now(timezone.utc).isoformat(), recoverable=False)],
         }
-

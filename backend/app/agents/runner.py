@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 import logging
 from typing import Any
 from sqlalchemy import select
-from app.agents.checkpointer import get_in_memory_checkpointer
+from app.agents.checkpointer import get_checkpointer, get_in_memory_checkpointer
 from app.agents.graph import create_katha_graph
 from app.agents.state import KathaEpisodeState
 from app.core.database import async_session_factory
@@ -22,7 +22,7 @@ class EpisodePipelineService:
     """Orchestrates LangGraph pipeline execution, checkpointing, and DB synchronization."""
 
     def __init__(self, checkpointer: Any = None) -> None:
-        self.checkpointer = checkpointer or get_in_memory_checkpointer()
+        self.checkpointer = checkpointer
 
     async def run_pipeline(
         self,
@@ -80,8 +80,12 @@ class EpisodePipelineService:
             payload={"episode_number": episode.episode_number, "title": episode.title},
         )
 
-        # 3. Construct Graph with Checkpointer
-        graph = create_katha_graph(llm=llm, checkpointer=self.checkpointer)
+        # 3. Resolve Checkpointer: Use injected checkpointer or active persistent checkpointer
+        active_checkpointer = self.checkpointer
+        if active_checkpointer is None:
+            active_checkpointer = await get_checkpointer()
+
+        graph = create_katha_graph(llm=llm, checkpointer=active_checkpointer)
         config = {"configurable": {"thread_id": episode_id}}
 
         try:
@@ -138,4 +142,3 @@ def launch_background_generation(
     task = asyncio.create_task(_runner())
     _running_jobs[episode_id] = task
     return True
-
