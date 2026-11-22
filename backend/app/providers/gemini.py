@@ -6,7 +6,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 from app.core.config import get_settings
 from app.core.exceptions import LLMProviderError, SchemaValidationError
-from app.providers.base import BaseLLMProvider
+from app.providers.base import BaseLLMProvider, ProviderUsageMetadata
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -21,6 +21,7 @@ class GeminiProvider(BaseLLMProvider):
         api_key: str | None = None,
         model: str = "gemini-2.0-flash",
     ) -> None:
+        super().__init__()
         self.api_key = api_key or settings.GEMINI_API_KEY
         self.model = model
         self.base_url = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -94,6 +95,20 @@ class GeminiProvider(BaseLLMProvider):
 
         res_json = await self._request_with_retry(payload)
 
+        # Record actual token usage metadata if available
+        usage_meta = res_json.get("usageMetadata", {})
+        prompt_tokens = usage_meta.get("promptTokenCount", 0)
+        completion_tokens = usage_meta.get("candidatesTokenCount", 0)
+        total_tokens = usage_meta.get("totalTokenCount", prompt_tokens + completion_tokens)
+        self.last_usage = ProviderUsageMetadata(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            model=self.model,
+            provider="gemini",
+            usage_type="ACTUAL" if usage_meta else "ESTIMATED",
+        )
+
         try:
             candidates = res_json.get("candidates", [])
             if not candidates:
@@ -127,6 +142,20 @@ class GeminiProvider(BaseLLMProvider):
             payload["systemInstruction"] = {"parts": [{"text": system_prompt}]}
 
         res_json = await self._request_with_retry(payload)
+
+        # Record actual token usage metadata if available
+        usage_meta = res_json.get("usageMetadata", {})
+        prompt_tokens = usage_meta.get("promptTokenCount", 0)
+        completion_tokens = usage_meta.get("candidatesTokenCount", 0)
+        total_tokens = usage_meta.get("totalTokenCount", prompt_tokens + completion_tokens)
+        self.last_usage = ProviderUsageMetadata(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            model=self.model,
+            provider="gemini",
+            usage_type="ACTUAL" if usage_meta else "ESTIMATED",
+        )
         try:
             return res_json["candidates"][0]["content"]["parts"][0]["text"]
         except Exception as exc:

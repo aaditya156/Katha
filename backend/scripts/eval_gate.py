@@ -20,10 +20,13 @@ from typing import Any
 # Ensure backend root is in Python path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from app.agents.graph import create_katha_graph
 from app.eval.golden_dataset import load_golden_dataset
 from app.providers.base import BaseLLMProvider
+from app.providers.factory import get_llm_provider
 from app.providers.mock import MockLLMProvider
 from app.services.evaluator import LLMJudgeEvaluator
+from app.services.experiments import format_script_for_eval
 
 # Configurable CI Gate Thresholds
 DEFAULT_MIN_PASS_RATE = float(os.getenv("EVAL_GATE_MIN_PASS_RATE", "0.85"))
@@ -95,19 +98,33 @@ async def run_evaluation_gate(
     missing_or_invalid_results: list[str] = []
 
     for idx, case in enumerate(golden_cases, start=1):
-        print(f"  [{idx}/{len(golden_cases)}] Evaluating '{case.title}' ({case.target_language})...", end=" ")
+        print(f"  [{idx}/{len(golden_cases)}] Generating & Evaluating '{case.title}' ({case.target_language})...", end=" ")
         
-        sample_script = (
-            f"Scene 1 - {case.genre}\n"
-            f"Characters: {', '.join(case.expected_characters)}\n"
-            f"Premise: {case.premise}\n\n"
-            f"{case.expected_characters[0]}: Suno, yeh safar aasan nahi hoga.\n"
-            f"{case.expected_characters[-1]}: Lekin hum peeche nahi hatenge. Script ready hai."
-        )
+        # 1. Execute actual LangGraph agent pipeline generation
+        graph = create_katha_graph(llm=llm_provider)
+        initial_state = {
+            "series_id": "",
+            "episode_id": f"ep-ci-{case.id}",
+            "episode_number": 1,
+            "premise": case.premise,
+            "target_language": case.target_language,
+            "target_duration_minutes": case.target_duration_minutes,
+            "genre": case.genre,
+            "characters_hint": case.expected_characters,
+            "simulation_flags": {},
+        }
+
+        try:
+            final_state = await graph.ainvoke(initial_state)
+            generated_script = format_script_for_eval(final_state)
+        except Exception as gen_exc:
+            missing_or_invalid_results.append(f"Case '{case.id}' pipeline generation failed: {gen_exc}")
+            print(f"❌ GENERATION ERROR ({gen_exc})")
+            continue
 
         try:
             res = await evaluator.evaluate_script(
-                script=sample_script,
+                script=generated_script,
                 outline=case.premise,
                 model_name=model_name,
                 provider_id=provider_name,

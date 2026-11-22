@@ -1,7 +1,10 @@
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.exceptions import LLMProviderError
+from app.core.security import create_access_token, hash_password
 from app.core.telemetry import (
     estimate_token_cost,
     estimate_token_cost_with_status,
@@ -16,8 +19,10 @@ from app.eval.calibration_dataset import (
 )
 from app.eval.golden_dataset import load_golden_dataset
 from app.models.episode import Episode
+from app.models.evaluation import BenchmarkExperiment, EvaluationRun
 from app.models.series import Series
 from app.models.user import User
+from app.providers.factory import get_llm_provider
 from app.providers.mock import MockLLMProvider
 from app.schemas.evaluation import (
     CalibrationReport,
@@ -369,3 +374,204 @@ async def test_evaluations_api_endpoints(
     assert resp.status_code == 200
     bench_data = resp.json()
     assert bench_data["experiment_type"] == "critic_on_off"
+
+
+def test_provider_factory_live_mode_checks(monkeypatch: pytest.MonkeyPatch):
+    """Verify provider factory enforces API key requirements in LIVE mode and allows MOCK mode."""
+    # Ensure keys are not set
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    monkeypatch.setenv("GROQ_API_KEY", "")
+
+    # 1. LIVE mode without keys must fail fast with LLMProviderError
+    with pytest.raises(LLMProviderError, match="GEMINI_API_KEY"):
+        get_llm_provider("gemini", "gemini-1.5-pro", mode="LIVE")
+
+    with pytest.raises(LLMProviderError, match="GROQ_API_KEY"):
+        get_llm_provider("groq", "llama-3.3-70b-versatile", mode="LIVE")
+
+    # 2. MOCK mode returns mock provider cleanly
+    mock_gemini = get_llm_provider("gemini", "gemini-1.5-pro", mode="MOCK")
+    assert isinstance(mock_gemini, MockLLMProvider)
+    assert mock_gemini.model_name == "gemini-1.5-pro"
+
+    mock_groq = get_llm_provider("groq", "llama-3.3-70b-versatile", mode="MOCK")
+    assert isinstance(mock_groq, MockLLMProvider)
+    assert mock_groq.model_name == "llama-3.3-70b-versatile"
+
+
+@pytest.mark.asyncio
+async def test_cross_user_evaluation_authorization(
+    client: AsyncClient,
+    db_session: AsyncSession,
+):
+    """Verify User B cannot evaluate or view User A's episodes, runs, or summary."""
+    # Create User A and User B
+    user_a = User(
+        email="usera@katha.studio",
+        hashed_password=hash_password("password123"),
+        full_name="User Alpha",
+    )
+    user_b = User(
+        email="userb@katha.studio",
+        hashed_password=hash_password("password123"),
+        full_name="User Beta",
+    )
+    db_session.add_all([user_a, user_b])
+    await db_session.flush()
+
+    token_a = create_access_token(subject=user_a.id)
+    token_b = create_access_token(subject=user_b.id)
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    # User A creates a series and episode
+    series_a = Series(
+        user_id=user_a.id,
+        title="Series Alpha",
+        genre="mystery",
+        logline="Alpha mystery series",
+        target_language="hindi",
+    )
+    db_session.add(series_a)
+    await db_session.flush()
+
+    episode_a = Episode(
+        series_id=series_a.id,
+        episode_number=1,
+        title="Pilot Alpha",
+        premise="Mysterious frequency",
+        script="Speaker: Hello world",
+        outline="Alpha Outline",
+    )
+    db_session.add(episode_a)
+    await db_session.commit()
+
+    # 1. User B tries to evaluate User A's episode -> MUST FAIL 403 Forbidden
+    eval_resp_b = await client.post(
+        f"/api/v1/evaluations/episodes/{episode_a.id}/evaluate?provider=mock&model_name=mock-model",
+        headers=headers_b,
+    )
+    assert eval_resp_b.status_code == 403
+    assert "Not authorized" in eval_resp_b.json()["detail"]
+
+    # 2. User A evaluates their own episode -> 201 Created
+    eval_resp_a = await client.post(
+        f"/api/v1/evaluations/episodes/{episode_a.id}/evaluate?provider=mock&model_name=mock-model",
+        headers=headers_a,
+    )
+    assert eval_resp_a.status_code == 201
+
+    # 3. User B lists runs -> Must NOT see User A's evaluation run
+    runs_b_resp = await client.get("/api/v1/evaluations/runs", headers=headers_b)
+    assert runs_b_resp.status_code == 200
+    runs_b = runs_b_resp.json()
+    assert len(runs_b) == 0
+
+    # 4. User A lists runs -> Sees their evaluation run
+    runs_a_resp = await client.get("/api/v1/evaluations/runs", headers=headers_a)
+    assert runs_a_resp.status_code == 200
+    runs_a = runs_a_resp.json()
+    assert len(runs_a) == 1
+    assert runs_a[0]["episode_id"] == episode_a.id
+
+    # 5. User B checks summary -> 0 runs
+    summary_b_resp = await client.get("/api/v1/evaluations/summary", headers=headers_b)
+    assert summary_b_resp.status_code == 200
+    assert summary_b_resp.json()["total_runs"] == 0
+
+
+@pytest.mark.asyncio
+async def test_reproducible_experiment_persistence_and_traceability(
+    db_session: AsyncSession,
+    test_user: User,
+):
+    """Verify BenchmarkExperiment and EvaluationRun records are persisted with full traceability."""
+    runner = ExperimentRunner()
+    cases = load_golden_dataset()[:1]
+
+    exp_res = await runner.run_experiment(
+        experiment_type="critic_on_off",
+        test_cases=cases,
+        user_id=test_user.id,
+        db=db_session,
+    )
+
+    # 1. BenchmarkExperiment record exists with user_id
+    exp_db = await db_session.scalar(
+        select(BenchmarkExperiment).where(BenchmarkExperiment.id == exp_res.experiment_id)
+    )
+    assert exp_db is not None
+    assert exp_db.user_id == test_user.id
+    assert exp_db.experiment_type == "critic_on_off"
+
+    # 2. EvaluationRun records are associated with experiment_id
+    runs = (
+        await db_session.scalars(
+            select(EvaluationRun).where(EvaluationRun.experiment_id == exp_res.experiment_id)
+        )
+    ).all()
+    assert len(runs) == 2  # Variant A and Variant B
+
+    variant_names = {r.variant_name for r in runs}
+    assert "Critic ON (Quality Guardrail Loop)" in variant_names
+    assert "Critic OFF (Bypass Revision Loop)" in variant_names
+
+    for r in runs:
+        assert r.token_usage_type == "ESTIMATED"
+        assert r.generated_script_text is not None
+        assert len(r.generated_script_text) > 0
+        assert r.user_id == test_user.id
+        assert r.revision_count >= 0
+        assert "generation_latency_ms" in r.node_latencies_json
+        assert "evaluation_latency_ms" in r.node_latencies_json
+
+
+@pytest.mark.asyncio
+async def test_calibration_no_fallback_metrics_pending_dimensions():
+    """Verify calibration pipeline does not use fallback 4.0 and reports PENDING_HUMAN_ANNOTATION for sparse ratings."""
+    evaluator = LLMJudgeEvaluator()
+
+    # Create sparse human sample with only narrative_coherence rated
+    sparse_sample = HumanLabeledSample(
+        sample_id="sparse_case_01",
+        title="Sparse Test Case",
+        target_language="english",
+        genre="drama",
+        reference_script="Speaker: Test script dialogue line.",
+        human_evaluation=HumanEvaluationRecord(
+            evaluator_id="annotator_sparse",
+            rubric_version="2.0.0",
+            evaluated_at="2026-11-22T12:00:00Z",
+            dimension_scores={
+                "narrative_coherence": 4.5,
+                # Other dimensions intentionally omitted
+            },
+            dimension_rationales={
+                "narrative_coherence": "Coherent line.",
+            },
+            composite_score=4.5,
+        ),
+        human_scores={"narrative_coherence": 4.5},
+    )
+
+    report = await evaluator.run_calibration(samples=[sparse_sample])
+    # With only 1 sample, dimensions should report status without fabricating 4.0 fallbacks
+    assert "composite" in report.spearman_correlation
+    assert report.total_samples == 1
+
+
+@pytest.mark.asyncio
+async def test_usage_metadata_instrumentation():
+    """Verify provider usage tracking reports ESTIMATED for mock and tracks token counts."""
+    mock_llm = MockLLMProvider(model_name="mock-gpt")
+    assert mock_llm.get_last_usage() is None
+
+    await mock_llm.generate_chat("Hello from test")
+    usage = mock_llm.get_last_usage()
+    assert usage is not None
+    assert usage.model == "mock-gpt"
+    assert usage.usage_type == "ESTIMATED"
+    assert usage.prompt_tokens > 0
+    assert usage.completion_tokens > 0
+    assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens
+

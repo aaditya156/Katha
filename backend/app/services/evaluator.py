@@ -254,37 +254,39 @@ class LLMJudgeEvaluator:
             for dim in dimensions:
                 h_val = sample.human_scores.get(dim)
                 if h_val is None:
-                    # Fallback mapping between new and old names
+                    # Backward-compatibility alias lookup only
                     if dim == "plot_coherence":
-                        h_val = sample.human_scores.get("narrative_coherence", 4.0)
+                        h_val = sample.human_scores.get("narrative_coherence")
                     elif dim == "narrative_coherence":
-                        h_val = sample.human_scores.get("plot_coherence", 4.0)
+                        h_val = sample.human_scores.get("plot_coherence")
                     elif dim == "language_naturalness":
-                        h_val = sample.human_scores.get("localization_quality", 4.0)
+                        h_val = sample.human_scores.get("localization_quality")
                     elif dim == "localization_quality":
-                        h_val = sample.human_scores.get("language_naturalness", 4.0)
+                        h_val = sample.human_scores.get("language_naturalness")
                     elif dim == "pacing":
-                        h_val = sample.human_scores.get("dialogue_quality", 4.0)
+                        h_val = sample.human_scores.get("dialogue_quality")
                     elif dim == "dialogue_quality":
-                        h_val = sample.human_scores.get("pacing", 4.0)
-                    else:
-                        h_val = 4.0
-                human_ratings[dim].append(h_val)
-                judge_ratings[dim].append(scores_map[dim])
+                        h_val = sample.human_scores.get("pacing")
 
-        # Compute metrics across all dimensions
-        spearman_correlations = {
-            dim: compute_spearman_rho(human_ratings[dim], judge_ratings[dim])
-            for dim in dimensions
-        }
-        weighted_kappas = {
-            dim: compute_weighted_cohens_kappa(human_ratings[dim], judge_ratings[dim])
-            for dim in dimensions
-        }
-        maes = {
-            dim: compute_mae(human_ratings[dim], judge_ratings[dim])
-            for dim in dimensions
-        }
+                # Strictly require valid paired score; NEVER fallback to fabricated 4.0
+                if h_val is not None:
+                    human_ratings[dim].append(h_val)
+                    judge_ratings[dim].append(scores_map[dim])
+
+        # Compute metrics only across dimensions with valid paired samples (>= 2 samples)
+        spearman_correlations: dict[str, float] = {}
+        weighted_kappas: dict[str, float | None] = {}
+        maes: dict[str, float] = {}
+
+        for dim in dimensions:
+            if len(human_ratings[dim]) >= 2:
+                spearman_correlations[dim] = compute_spearman_rho(human_ratings[dim], judge_ratings[dim])
+                weighted_kappas[dim] = compute_weighted_cohens_kappa(human_ratings[dim], judge_ratings[dim])
+                maes[dim] = compute_mae(human_ratings[dim], judge_ratings[dim])
+            else:
+                spearman_correlations[dim] = 0.0
+                weighted_kappas[dim] = None
+                maes[dim] = 0.0
 
         # Systematic weakness analysis
         weaknesses: list[str] = []

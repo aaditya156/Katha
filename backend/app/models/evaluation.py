@@ -12,6 +12,18 @@ class EvaluationRun(Base, UUIDMixin, TimestampMixin):
 
     __tablename__ = "evaluation_runs"
 
+    user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    experiment_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("benchmark_experiments.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     series_id: Mapped[str | None] = mapped_column(
         String(36),
         ForeignKey("series.id", ondelete="CASCADE"),
@@ -25,6 +37,7 @@ class EvaluationRun(Base, UUIDMixin, TimestampMixin):
         index=True,
     )
     test_case_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    variant_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     # Provider & Model configuration
     model_name: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -36,9 +49,11 @@ class EvaluationRun(Base, UUIDMixin, TimestampMixin):
     latency_ms: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     prompt_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     completion_tokens: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    token_usage_type: Mapped[str] = mapped_column(String(20), default="ESTIMATED", nullable=False)  # ACTUAL, ESTIMATED, MOCK
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     revision_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     tts_cache_hit_rate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    generated_script_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Evaluation quality scores (1.0 to 5.0 scale per AGENTS.md / Rubric)
     composite_score: Mapped[float] = mapped_column(Float, nullable=False)
@@ -66,10 +81,16 @@ class EvaluationRun(Base, UUIDMixin, TimestampMixin):
 
 
 class BenchmarkExperiment(Base, UUIDMixin, TimestampMixin):
-    """Stores aggregate benchmark experiment results for model comparison, critic abaltion, or RAG ablation."""
+    """Stores aggregate benchmark experiment results for model comparison, critic ablation, or RAG ablation."""
 
     __tablename__ = "benchmark_experiments"
 
+    user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     experiment_type: Mapped[str] = mapped_column(String(50), nullable=False)  # critic_on_off, rag_ablation, model_comparison
     status: Mapped[str] = mapped_column(String(50), default="COMPLETED", nullable=False)

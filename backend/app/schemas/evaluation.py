@@ -186,6 +186,9 @@ class EvaluationRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True, strict=True)
 
     id: str
+    user_id: str | None = None
+    experiment_id: str | None = None
+    variant_name: str | None = None
     series_id: str | None = None
     episode_id: str | None = None
     test_case_id: str | None = None
@@ -196,9 +199,11 @@ class EvaluationRunResponse(BaseModel):
     latency_ms: float
     prompt_tokens: int
     completion_tokens: int
+    token_usage_type: str = "ESTIMATED"
     estimated_cost_usd: float
     revision_count: int
     tts_cache_hit_rate: float
+    generated_script_text: str | None = None
     composite_score: float
     character_consistency: float
     plot_coherence: float

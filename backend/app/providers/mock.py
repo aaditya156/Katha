@@ -2,7 +2,7 @@ import asyncio
 from typing import Any, TypeVar
 from pydantic import BaseModel
 from app.core.exceptions import LLMProviderError, SchemaValidationError
-from app.providers.base import BaseLLMProvider
+from app.providers.base import BaseLLMProvider, ProviderUsageMetadata
 from app.schemas.outline import EpisodeOutline
 from app.schemas.script import (
     BibleUpdatePayload,
@@ -41,12 +41,15 @@ class MockLLMProvider(BaseLLMProvider):
         critic_failing_scenes: list[int] | None = None,
         force_critic_score: float | None = None,
         transient_schema_errors: int = 0,
+        model_name: str = "mock-model",
     ) -> None:
+        super().__init__()
         self.mode = mode
         self.delay_seconds = delay_seconds
         self.critic_failing_scenes = critic_failing_scenes or []
         self.force_critic_score = force_critic_score
         self.transient_schema_errors = transient_schema_errors
+        self.model_name = model_name
         self._schema_error_count = 0
 
     async def generate_structured(
@@ -85,6 +88,18 @@ class MockLLMProvider(BaseLLMProvider):
                 raw_output='{"unexpected_field": "test"}',
                 error_detail="Field required: missing required schema keys",
             )
+
+        prompt_tokens = int(len(prompt.split()) * 1.35)
+        completion_tokens = 350
+        self.last_usage = ProviderUsageMetadata(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            latency_ms=15.0,
+            model=self.model_name,
+            provider="mock",
+            usage_type="ESTIMATED",
+        )
 
         # 1. EpisodeOutline
         if schema == EpisodeOutline:
@@ -678,4 +693,15 @@ class MockLLMProvider(BaseLLMProvider):
     ) -> str:
         if self.mode == "provider_failure":
             raise LLMProviderError("mock", "Service temporarily overloaded (HTTP 503)", "Upstream503")
-        return f"Mock response for prompt: {prompt[:50]}..."
+        res = f"Mock response for prompt: {prompt[:50]}..."
+        prompt_tokens = int(len(prompt.split()) * 1.35)
+        completion_tokens = int(len(res.split()) * 1.35)
+        self.last_usage = ProviderUsageMetadata(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=prompt_tokens + completion_tokens,
+            model=self.model_name,
+            provider="mock",
+            usage_type="ESTIMATED",
+        )
+        return res

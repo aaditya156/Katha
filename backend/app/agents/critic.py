@@ -7,7 +7,7 @@ from app.agents.state import KathaEpisodeState
 from app.core.events import event_hub
 from app.core.exceptions import LLMProviderError, SchemaValidationError
 from app.providers.base import BaseLLMProvider
-from app.schemas.script import CritiqueReport, GraphErrorRecord
+from app.schemas.script import CritiqueReport, GraphErrorRecord, SceneCritique
 
 logger = logging.getLogger(__name__)
 
@@ -40,9 +40,22 @@ async def critic_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
     if sim_flags.get("disable_critic"):
         logger.info(f"[{episode_id}] Critic disabled via simulation_flags (Ablation). Bypassing revision loop.")
         critique = CritiqueReport(
-            overall_score=8.0,
+            score=8.0,
             passed=True,
-            scene_evaluations=[],
+            consistency_score=8.0,
+            coherence_score=8.0,
+            naturalness_score=8.0,
+            pacing_score=8.0,
+            safety_score=8.0,
+            scene_critiques=[
+                SceneCritique(
+                    scene_number=1,
+                    passed=True,
+                    score=8.0,
+                    issues=[],
+                    suggested_improvements="",
+                )
+            ],
             failing_scene_numbers=[],
             feedback="Critic disabled for ablation experiment.",
         )

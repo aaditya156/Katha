@@ -6,7 +6,7 @@ import httpx
 from pydantic import BaseModel, ValidationError
 from app.core.config import get_settings
 from app.core.exceptions import LLMProviderError, SchemaValidationError
-from app.providers.base import BaseLLMProvider
+from app.providers.base import BaseLLMProvider, ProviderUsageMetadata
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -21,6 +21,7 @@ class GroqProvider(BaseLLMProvider):
         api_key: str | None = None,
         model: str = "llama-3.3-70b-versatile",
     ) -> None:
+        super().__init__()
         self.api_key = api_key or settings.GROQ_API_KEY
         self.model = model
         self.base_url = "https://api.groq.com/openai/v1/chat/completions"
@@ -94,6 +95,20 @@ class GroqProvider(BaseLLMProvider):
 
         res_json = await self._request_with_retry(payload)
 
+        # Record actual token usage metadata if available
+        usage = res_json.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+        self.last_usage = ProviderUsageMetadata(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            model=self.model,
+            provider="groq",
+            usage_type="ACTUAL" if usage else "ESTIMATED",
+        )
+
         try:
             raw_text = res_json["choices"][0]["message"]["content"]
             parsed_dict = json.loads(raw_text)
@@ -128,6 +143,20 @@ class GroqProvider(BaseLLMProvider):
         }
 
         res_json = await self._request_with_retry(payload)
+
+        # Record actual token usage metadata if available
+        usage = res_json.get("usage", {})
+        prompt_tokens = usage.get("prompt_tokens", 0)
+        completion_tokens = usage.get("completion_tokens", 0)
+        total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
+        self.last_usage = ProviderUsageMetadata(
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            model=self.model,
+            provider="groq",
+            usage_type="ACTUAL" if usage else "ESTIMATED",
+        )
         try:
             return res_json["choices"][0]["message"]["content"]
         except Exception as exc:

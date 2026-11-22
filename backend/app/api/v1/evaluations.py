@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import get_current_active_user, get_db
-from app.core.exceptions import EntityNotFoundException
+from app.core.exceptions import AuthorizationFailedException, EntityNotFoundException
 from app.eval.golden_dataset import GoldenTestCase, load_golden_dataset
 from app.models.episode import Episode
 from app.models.evaluation import BenchmarkExperiment, EvaluationRun
@@ -38,10 +38,15 @@ async def evaluate_episode(
     model_name: str = Query(default="gemini-1.5-pro"),
     provider: str = Query(default="gemini"),
 ) -> EvaluationRunResponse:
-    """Evaluate an existing episode using the 5-dimensional LLM Judge and persist metric trace."""
+    """Evaluate an existing episode using the 7-dimensional LLM Judge and persist metric trace with user ownership."""
     episode = await db.scalar(select(Episode).where(Episode.id == episode_id))
     if not episode:
         raise EntityNotFoundException("Episode", episode_id)
+
+    # Verify series ownership
+    series = await db.scalar(select(Series).where(Series.id == episode.series_id))
+    if not series or series.user_id != current_user.id:
+        raise AuthorizationFailedException("Not authorized to evaluate episodes in another user's series.")
 
     script_content = episode.script or episode.title
     outline_content = episode.outline or episode.premise
@@ -54,6 +59,7 @@ async def evaluate_episode(
     )
 
     run = EvaluationRun(
+        user_id=current_user.id,
         series_id=episode.series_id,
         episode_id=episode.id,
         model_name=model_name,
@@ -63,9 +69,11 @@ async def evaluate_episode(
         latency_ms=eval_result.latency_ms,
         prompt_tokens=eval_result.prompt_tokens,
         completion_tokens=eval_result.completion_tokens,
+        token_usage_type="ACTUAL" if eval_result.cost_status == "ESTIMATED" and provider != "mock" else "ESTIMATED",
         estimated_cost_usd=eval_result.estimated_cost_usd,
         revision_count=1,
         tts_cache_hit_rate=0.85,
+        generated_script_text=str(script_content),
         composite_score=eval_result.composite_score,
         character_consistency=eval_result.rubric.character_consistency.score,
         plot_coherence=eval_result.rubric.plot_coherence.score,
@@ -96,8 +104,12 @@ async def list_evaluation_runs(
     passed: bool | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
 ) -> list[EvaluationRunResponse]:
-    """List historical evaluation runs with metric traces."""
-    stmt = select(EvaluationRun).order_by(EvaluationRun.created_at.desc())
+    """List historical evaluation runs with metric traces, restricted strictly to current user's runs."""
+    stmt = (
+        select(EvaluationRun)
+        .where(EvaluationRun.user_id == current_user.id)
+        .order_by(EvaluationRun.created_at.desc())
+    )
     if model_name:
         stmt = stmt.where(EvaluationRun.model_name == model_name)
     if passed is not None:
@@ -113,8 +125,10 @@ async def get_evaluation_summary(
     current_user: Annotated[User, Depends(get_current_active_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> EvaluationSummaryMetrics:
-    """Aggregate quality, latency percentiles, cost, and reliability metrics across all runs."""
-    runs = (await db.scalars(select(EvaluationRun))).all()
+    """Aggregate quality, latency percentiles, cost, and reliability metrics across current user's runs."""
+    runs = (await db.scalars(
+        select(EvaluationRun).where(EvaluationRun.user_id == current_user.id)
+    )).all()
 
     if not runs:
         return EvaluationSummaryMetrics(
@@ -199,6 +213,7 @@ async def run_benchmark_experiment(
         test_cases=cases,
         model_a=model_a,
         model_b=model_b,
+        user_id=current_user.id,
         db=db,
     )
 
@@ -207,6 +222,7 @@ async def run_benchmark_experiment(
 async def get_judge_calibration_report(
     current_user: Annotated[User, Depends(get_current_active_user)],
 ) -> CalibrationReport:
-    """Run calibration analysis against the 30 human ground-truth scripts (Spearman rho & Cohen's kappa)."""
+    """Run calibration analysis against human ground-truth scripts (returns PENDING_HUMAN_ANNOTATION when empirical human annotations are pending)."""
     return await evaluator_service.run_calibration()
+
 
