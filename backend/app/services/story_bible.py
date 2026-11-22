@@ -1,6 +1,7 @@
 import logging
 import math
 import re
+import unicodedata
 from typing import Any
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +53,20 @@ def calculate_continuity_multiplier(entity_type: str, metadata: dict[str, Any] |
         multiplier *= CONTINUITY_WEIGHT_LOW_IMPORTANCE
 
     return multiplier
+
+
+def tokenize_multilingual_query(query: str) -> list[str]:
+    """Unicode-aware query tokenizer for English, Hinglish, and Hindi (Devanagari).
+
+    - Normalizes Unicode to NFC form.
+    - Preserves Devanagari grapheme sequences including vowel signs (matras), virama, and nukta.
+    - Strips Western punctuation and Devanagari punctuation (danda \\u0964, double danda \\u0965).
+    - Preserves English, Hinglish, and alphanumeric tokens.
+    """
+    normalized = unicodedata.normalize("NFC", query)
+    pattern = r"[a-zA-Z0-9\u0900-\u0963\u0966-\u097F]+"
+    tokens = re.findall(pattern, normalized)
+    return [t for t in tokens if len(t) > 1 or ("\u0900" <= t <= "\u097F" and t not in ("\u0964", "\u0965"))]
 
 
 class StoryBibleRetrievalError(KathaException):
@@ -251,7 +266,7 @@ class StoryBibleService:
                 dense_scored.append((row[0], sim))
 
         # 2. Native Multilingual Full-Text Search using generated search_vector and GIN index
-        words = [w.strip(".,!?:;\"'()[]{}") for w in query.split() if len(w.strip(".,!?:;\"'()[]{}")) > 1]
+        words = tokenize_multilingual_query(query)
         if words:
             ts_query_str = " OR ".join(words)
         else:
@@ -300,7 +315,7 @@ class StoryBibleService:
                     dense_scored.append((entry, sim))
         dense_scored.sort(key=lambda x: x[1], reverse=True)
 
-        query_tokens = set(query.lower().split())
+        query_tokens = set(t.lower() for t in tokenize_multilingual_query(query))
         sparse_scored: list[tuple[StoryBibleEntry, float]] = []
         for entry in all_entries:
             entry_text = f"{entry.entity_name} {entry.entity_type} {entry.content}".lower()

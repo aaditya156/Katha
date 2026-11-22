@@ -1,4 +1,4 @@
-"""Add HNSW vector index and multilingual generated full-text search index for Story Bible
+"""Add HNSW vector index and full-text search index for Story Bible hybrid retrieval
 
 Revision ID: 004_story_bible_hybrid_indexes
 Revises: 003_evaluations
@@ -31,24 +31,17 @@ def upgrade() -> None:
             """
         )
 
-        # 3. Add multilingual generated tsvector column (English + Simple for Hindi/Hinglish)
+        # 3. Create GIN index for PostgreSQL Full-Text Search across entity_name, entity_type, and content
         op.execute(
             """
-            ALTER TABLE story_bible_entries
-            ADD COLUMN IF NOT EXISTS search_vector tsvector
-            GENERATED ALWAYS AS (
-                to_tsvector('english', coalesce(entity_name, '') || ' ' || coalesce(entity_type, '') || ' ' || coalesce(content, ''))
-                || to_tsvector('simple', coalesce(entity_name, '') || ' ' || coalesce(entity_type, '') || ' ' || coalesce(content, ''))
-            ) STORED;
-            """
-        )
-
-        # 4. Create GIN index on generated search_vector column
-        op.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_story_bible_search_vector
+            CREATE INDEX IF NOT EXISTS idx_story_bible_tsv_gin
             ON story_bible_entries
-            USING gin (search_vector);
+            USING gin (
+                to_tsvector(
+                    'english',
+                    coalesce(entity_name, '') || ' ' || coalesce(entity_type, '') || ' ' || coalesce(content, '')
+                )
+            );
             """
         )
 
@@ -56,6 +49,5 @@ def upgrade() -> None:
 def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name == "postgresql":
-        op.execute("DROP INDEX IF EXISTS idx_story_bible_search_vector;")
-        op.execute("ALTER TABLE story_bible_entries DROP COLUMN IF EXISTS search_vector;")
+        op.execute("DROP INDEX IF EXISTS idx_story_bible_tsv_gin;")
         op.execute("DROP INDEX IF EXISTS idx_story_bible_embedding_hnsw;")

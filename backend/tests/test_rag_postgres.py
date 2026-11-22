@@ -26,6 +26,7 @@ from app.services.story_bible import (
     DEFAULT_RRF_K,
     StoryBibleService,
     calculate_continuity_multiplier,
+    tokenize_multilingual_query,
 )
 
 settings = get_settings()
@@ -450,6 +451,122 @@ async def test_postgres_writer_prompt_context_injection(pg_session: AsyncSession
         assert "RJ Kabir" in writer_prompts[0] or "Haveli Basement" in writer_prompts[0]
     finally:
         story_bible_service.session_factory = orig_session_factory
+
+
+async def test_unicode_aware_query_tokenization():
+    """Verify Unicode-aware tokenizer preserves Devanagari graphemes and handles Hindi & English punctuation."""
+    # 1. Hindi with danda, double danda, quotes and exclamation
+    hindi_q = 'चांदनी चौक की पुरानी हवेली! क्या 1947 के "दस्तावेज़" सच हैं? हाँ, बिल्कुल।'
+    hindi_tokens = tokenize_multilingual_query(hindi_q)
+    assert "चांदनी" in hindi_tokens
+    assert "हवेली" in hindi_tokens
+    assert "दस्तावेज़" in hindi_tokens
+    assert "बिल्कुल" in hindi_tokens
+    assert "।" not in hindi_tokens
+    assert "!" not in hindi_tokens
+    assert '"' not in hindi_tokens
+
+    # 2. Hinglish with hyphen, apostrophe, and mix of English/Hindi words
+    hinglish_q = "RJ Kabir's late-night haveli broadcast... bhoot aaya kya?"
+    hinglish_tokens = tokenize_multilingual_query(hinglish_q)
+    assert "Kabir" in hinglish_tokens
+    assert "haveli" in hinglish_tokens
+    assert "broadcast" in hinglish_tokens
+    assert "bhoot" in hinglish_tokens
+
+    # 3. English formal legal query
+    eng_q = "Secret safe: containing partition property deeds (1947)?"
+    eng_tokens = tokenize_multilingual_query(eng_q)
+    assert "deeds" in eng_tokens
+    assert "1947" in eng_tokens
+    assert "partition" in eng_tokens
+
+
+async def test_populated_dataset_explain_analyze(pg_session: AsyncSession, seeded_series):
+    """Verify actual query plans using EXPLAIN (ANALYZE, BUFFERS) on a populated, analyzed table."""
+    series_a_id, _, service = seeded_series
+
+    # 1. Populate 40 additional entries in Series A and Series B for realistic planner statistics
+    for i in range(25):
+        entry = StoryBibleEntry(
+            series_id=series_a_id,
+            entity_type="lore",
+            entity_name=f"Haveli Room {i}",
+            content=f"Secret room number {i} in old Delhi haveli with partition deeds and antiques.",
+            metadata_json={"importance": "medium"},
+            embedding=await service.embedding_provider.embed_text(f"Secret room {i} in haveli"),
+        )
+        pg_session.add(entry)
+    await pg_session.commit()
+
+    # 2. Run ANALYZE on the populated table to ensure up-to-date planner statistics
+    await pg_session.execute(text("ANALYZE story_bible_entries"))
+
+    # 3. Test Plan A: Production Multilingual Full-Text Search
+    plan_fts_res = await pg_session.execute(
+        text(
+            f"""
+            EXPLAIN (ANALYZE, BUFFERS)
+            SELECT id, entity_name, ts_rank_cd(search_vector, (websearch_to_tsquery('english', 'haveli') || websearch_to_tsquery('simple', 'haveli'))) AS rank
+            FROM story_bible_entries
+            WHERE series_id = '{series_a_id}'
+              AND search_vector @@ (websearch_to_tsquery('english', 'haveli') || websearch_to_tsquery('simple', 'haveli'))
+            ORDER BY rank DESC
+            LIMIT 10;
+            """
+        )
+    )
+    plan_fts = [row[0] for row in plan_fts_res.all()]
+    print("\n--- [EXPLAIN ANALYZE: FTS] ---")
+    for l in plan_fts:
+        print(l)
+    assert any("story_bible_entries" in l for l in plan_fts)
+
+    # 4. Test Plan B: Production Vector Search with series_id filter
+    query_vec = await service.embedding_provider.embed_text("secret room haveli deeds")
+    vec_str = "[" + ",".join(str(x) for x in query_vec) + "]"
+
+    plan_vec_res = await pg_session.execute(
+        text(
+            f"""
+            EXPLAIN (ANALYZE, BUFFERS)
+            SELECT id, entity_name, embedding <=> '{vec_str}'::vector AS distance
+            FROM story_bible_entries
+            WHERE series_id = '{series_a_id}'
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> '{vec_str}'::vector ASC
+            LIMIT 10;
+            """
+        )
+    )
+    plan_vec = [row[0] for row in plan_vec_res.all()]
+    print("\n--- [EXPLAIN ANALYZE: Vector Filtered] ---")
+    for l in plan_vec:
+        print(l)
+    assert any("story_bible_entries" in l for l in plan_vec)
+
+    # 5. Test Plan C: Unfiltered Global Vector Search (HNSW Index)
+    await pg_session.execute(text("SET enable_seqscan = off"))
+    try:
+        plan_hnsw_res = await pg_session.execute(
+            text(
+                f"""
+                EXPLAIN (ANALYZE, BUFFERS)
+                SELECT id, entity_name, embedding <=> '{vec_str}'::vector AS distance
+                FROM story_bible_entries
+                WHERE embedding IS NOT NULL
+                ORDER BY embedding <=> '{vec_str}'::vector ASC
+                LIMIT 10;
+                """
+            )
+        )
+        plan_hnsw = [row[0] for row in plan_hnsw_res.all()]
+        print("\n--- [EXPLAIN ANALYZE: Unfiltered HNSW] ---")
+        for l in plan_hnsw:
+            print(l)
+        assert any("idx_story_bible_embedding_hnsw" in l for l in plan_hnsw)
+    finally:
+        await pg_session.execute(text("SET enable_seqscan = on"))
 
 
 async def test_continuity_weight_heuristics():
