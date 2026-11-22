@@ -19,10 +19,11 @@ settings = get_settings()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan context: initialize event streaming and database schema."""
+    """Application lifespan context: initialize event streaming, checkpointer, and database schema."""
     from app.core.events import event_hub
     from app.core.database import engine
     from app.models.base import Base
+    from app.agents.checkpointer import init_checkpointer, close_postgres_checkpointer
     import app.models  # noqa: F401 - ensure all models are registered
 
     await event_hub.initialize()
@@ -31,7 +32,14 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
         logger.info("Local SQLite database schema verified.")
-    yield
+    else:
+        # In PostgreSQL environment, initialize persistent checkpointer and verify checkpoint schema
+        await init_checkpointer()
+
+    try:
+        yield
+    finally:
+        await close_postgres_checkpointer()
 
 
 app = FastAPI(
