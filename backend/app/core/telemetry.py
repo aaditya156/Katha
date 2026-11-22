@@ -5,7 +5,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# Standard Pricing per 1M tokens ($USD) - Reference: Gemini & Groq pricing tables
+# Standard Pricing per 1M tokens ($USD) - Configurable runtime registry
 MODEL_PRICING: dict[str, dict[str, float]] = {
     # Gemini 1.5 Flash: $0.075 / 1M prompt, $0.30 / 1M completion
     "gemini-1.5-flash": {"prompt": 0.075, "completion": 0.30},
@@ -19,7 +19,42 @@ MODEL_PRICING: dict[str, dict[str, float]] = {
     "llama-3.1-8b-instant": {"prompt": 0.05, "completion": 0.08},
     # Mock / Testing: $0.00
     "mock": {"prompt": 0.0, "completion": 0.0},
+    "mock-model": {"prompt": 0.0, "completion": 0.0},
+    "mock-low": {"prompt": 0.0, "completion": 0.0},
 }
+
+
+def register_model_pricing(model_name: str, prompt_price_per_1m: float, completion_price_per_1m: float) -> None:
+    """Register or update runtime pricing per 1M tokens for a given model without hardcoding."""
+    MODEL_PRICING[model_name.lower()] = {
+        "prompt": prompt_price_per_1m,
+        "completion": completion_price_per_1m,
+    }
+    logger.info(f"Registered model pricing for '{model_name}': prompt=${prompt_price_per_1m}/1M, completion=${completion_price_per_1m}/1M")
+
+
+def estimate_token_cost_with_status(
+    model_name: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+) -> tuple[float, str]:
+    """Calculate the estimated USD cost for an LLM invocation.
+    
+    Returns (cost_usd, status) where status is 'ESTIMATED', 'UNKNOWN', or 'MOCK'.
+    Does NOT fabricate pricing for unconfigured models.
+    """
+    key = model_name.lower()
+    if key in ("mock", "mock-model", "mock-low"):
+        return 0.0, "MOCK"
+
+    pricing = MODEL_PRICING.get(key)
+    if not pricing:
+        logger.warning(f"Pricing for model '{model_name}' is not configured; marking as UNKNOWN without fabricating costs.")
+        return 0.0, "UNKNOWN"
+
+    prompt_cost = (prompt_tokens / 1_000_000.0) * pricing["prompt"]
+    completion_cost = (completion_tokens / 1_000_000.0) * pricing["completion"]
+    return round(prompt_cost + completion_cost, 6), "ESTIMATED"
 
 
 def estimate_token_cost(
@@ -27,14 +62,9 @@ def estimate_token_cost(
     prompt_tokens: int,
     completion_tokens: int,
 ) -> float:
-    """Calculate the estimated USD cost for an LLM invocation based on token counts."""
-    pricing = MODEL_PRICING.get(
-        model_name.lower(),
-        MODEL_PRICING.get("gemini-1.5-flash", {"prompt": 0.075, "completion": 0.30}),
-    )
-    prompt_cost = (prompt_tokens / 1_000_000.0) * pricing["prompt"]
-    completion_cost = (completion_tokens / 1_000_000.0) * pricing["completion"]
-    return round(prompt_cost + completion_cost, 6)
+    """Calculate estimated USD cost; returns 0.0 if pricing is unknown (see estimate_token_cost_with_status)."""
+    cost, _ = estimate_token_cost_with_status(model_name, prompt_tokens, completion_tokens)
+    return cost
 
 
 @dataclass

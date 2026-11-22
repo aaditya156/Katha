@@ -4,7 +4,7 @@ import logging
 import time
 from typing import Any
 from app.core.exceptions import LLMProviderError, SchemaValidationError
-from app.core.telemetry import estimate_token_cost, telemetry_tracer
+from app.core.telemetry import estimate_token_cost, estimate_token_cost_with_status, telemetry_tracer
 from app.eval.calibration_dataset import (
     HUMAN_CALIBRATION_BENCHMARK,
     compute_mae,
@@ -26,37 +26,54 @@ from app.schemas.script import CastScript
 logger = logging.getLogger(__name__)
 
 
-RUBRIC_SYSTEM_PROMPT = """You are the Chief Audio Drama Critic and LLM Evaluation Judge in Katha Studio.
-Your responsibility is to strictly and objectively grade audio story scripts on a 1.0 to 5.0 scale according to the rigorous Katha Studio Production Rubric.
+RUBRIC_VERSION = "2.0.0"
 
-DIMENSIONS TO EVALUATE:
-1. Character Consistency (1.0 to 5.0):
-   - 5.0: Characters exhibit distinct vocal archetypes, consistent psychological motivations, and organic interpersonal subtext.
-   - 3.0: Characters are distinguishable but lack depth or exhibit minor vocal personality drift.
-   - 1.0: Severe persona collapse, characters contradict established traits or swap voices mid-scene.
+RUBRIC_SYSTEM_PROMPT = f"""You are the Chief Audio Drama Critic and LLM Evaluation Judge in AditStudio.
+Your responsibility is to strictly and objectively grade audio story scripts on a 1.0 to 5.0 scale according to the AditStudio Production Rubric (v{RUBRIC_VERSION}).
 
-2. Plot Coherence (1.0 to 5.0):
+DIMENSIONS TO EVALUATE (1.0 to 5.0 scale):
+
+1. Narrative Coherence:
    - 5.0: Rock-solid dramatic causality, clear scene objectives, high stakes, and logical cause-and-effect progression.
    - 3.0: General plot spine holds together but contains minor leaps of logic or convenient coincidences.
    - 1.0: Hallucinatory plot breaks, irreconcilable narrative contradictions, or missing structural beats.
 
-3. Language Naturalness (1.0 to 5.0):
-   - 5.0: Flawlessly authentic dialect and conversational cadence (Hindi, Hinglish, or English) with culturally grounded idioms and realistic dialogue length.
-   - 3.0: Grammatically correct but slightly stilted, literary, or repetitive code-switching.
+2. Character Consistency:
+   - 5.0: Characters exhibit distinct vocal archetypes, consistent psychological motivations, and organic interpersonal subtext.
+   - 3.0: Characters are distinguishable but lack depth or exhibit minor vocal personality drift.
+   - 1.0: Severe persona collapse, characters contradict established traits or swap voices mid-scene.
+
+3. Dialogue Quality:
+   - 5.0: Subtext-rich, crisp audio rhythm, vivid acoustic soundscape cues (SFX, ambient beds, pauses), no dialogue bloat.
+   - 3.0: Adequate tempo but lacks rich audio cues or has brief dialogue lulls.
+   - 1.0: Monologue bloat (long unformatted paragraphs) or jarring temporal halts unsuitable for the audio medium.
+
+4. Plot Continuity:
+   - 5.0: Flawless adherence to established Story Bible lore, seamless resolution or continuation of prior episode plot threads.
+   - 3.0: Broadly adheres to established lore but misses minor canonical details.
+   - 1.0: Direct contradiction of established story memories, rules, or historical facts.
+
+5. Localization Quality:
+   - 5.0: Flawlessly authentic dialect and conversational cadence (Hindi, Hinglish, or English) with culturally grounded idioms and natural code-switching.
+   - 3.0: Grammatically correct but slightly stilted, textbook register, or repetitive code-switching.
    - 1.0: Clunky machine translation, unnatural textbook English, or inappropriate dialect registers.
 
-4. Pacing & Audio Soundscape (1.0 to 5.0):
-   - 5.0: Masterful rhythm tailored for the audio medium, vivid acoustic soundscape cues (SFX, ambient beds, pauses), no dialogue bloat.
-   - 3.0: Adequate tempo but lacks rich audio cues or has brief dialogue lulls.
-   - 1.0: Monologue bloat (paragraphs of text without acoustic direction) or jarring temporal halts.
+6. Instruction Adherence:
+   - 5.0: Strict compliance with prompt, outline beats, required duration, and cast constraints without silent omission.
+   - 3.0: Follows major outline beats but leaves minor secondary requirements unfulfilled.
+   - 1.0: Fails to incorporate core outline premise or silently drops required characters.
 
-5. Content Safety (1.0 to 5.0):
+7. Content Safety:
    - 5.0: Zero hate speech, harassment, uncontextualized graphic violence, or safety policy violations.
    - 3.0: Edgy dramatic themes handled with acceptable dramatic context.
-   - 1.0: Direct, gratuitous violations of safety, self-harm, or hate speech policies.
+   - 1.0: Direct, gratuitous violations of broadcast safety or self-harm guidelines.
+
+CRITICAL INSTRUCTION ON EVIDENCE AND OMISSIONS:
+- Never silently treat missing evidence as a positive score. If an outline constraint or Story Bible lore is omitted or contradicted, penalize Instruction Adherence and Plot Continuity with concrete evidence.
+- Every dimension must include specific line quotes or structural flaws in its evidence list.
 
 WEIGHTED COMPOSITE FORMULA:
-Composite = (0.25 * Character) + (0.25 * Plot) + (0.25 * Language) + (0.15 * Pacing) + (0.10 * Safety)
+Composite = (0.20 * Narrative) + (0.20 * Character) + (0.15 * Dialogue) + (0.15 * Continuity) + (0.15 * Localization) + (0.10 * Instruction) + (0.05 * Safety)
 A script passes if Composite >= 3.5 AND Safety >= 4.0.
 """
 
@@ -105,8 +122,8 @@ class LLMJudgeEvaluator:
 
             # Approximate token counts
             prompt_tokens = int(len(prompt.split()) * 1.35)
-            completion_tokens = 450
-            cost_usd = estimate_token_cost(model_name, prompt_tokens, completion_tokens)
+            completion_tokens = 550
+            cost_usd, cost_status = estimate_token_cost_with_status(model_name, prompt_tokens, completion_tokens)
 
             span.finish(
                 status="SUCCESS",
@@ -115,15 +132,23 @@ class LLMJudgeEvaluator:
                 model_name=model_name,
             )
 
-            # Compute weighted composite score
+            # Compute weighted 7-dimension composite score
+            narr_s = rubric_output.narrative_coherence.score
             char_s = rubric_output.character_consistency.score
-            plot_s = rubric_output.plot_coherence.score
-            lang_s = rubric_output.language_naturalness.score
-            pace_s = rubric_output.pacing.score
+            dial_s = rubric_output.dialogue_quality.score
+            plot_s = rubric_output.plot_continuity.score
+            loc_s = rubric_output.localization_quality.score
+            inst_s = rubric_output.instruction_adherence.score
             safe_s = rubric_output.safety.score
 
             composite = round(
-                (0.25 * char_s) + (0.25 * plot_s) + (0.25 * lang_s) + (0.15 * pace_s) + (0.10 * safe_s),
+                (0.20 * narr_s)
+                + (0.20 * char_s)
+                + (0.15 * dial_s)
+                + (0.15 * plot_s)
+                + (0.15 * loc_s)
+                + (0.10 * inst_s)
+                + (0.05 * safe_s),
                 2,
             )
 
@@ -143,10 +168,12 @@ class LLMJudgeEvaluator:
                 passed=passed,
                 verdict=verdict,
                 rubric=rubric_output,
+                rubric_version=RUBRIC_VERSION,
                 latency_ms=round(latency_ms, 2),
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 estimated_cost_usd=cost_usd,
+                cost_status=cost_status,
             )
 
         except Exception as exc:
@@ -159,85 +186,113 @@ class LLMJudgeEvaluator:
         samples: list[HumanLabeledSample] | None = None,
         model_name: str = "gemini-1.5-pro",
     ) -> CalibrationReport:
-        """Run statistical calibration of LLM judge against ground-truth human expert ratings."""
-        dataset = samples or load_calibration_dataset()
-        if not dataset:
-            raise ValueError("No calibration samples available.")
+        """Run statistical calibration of LLM judge against ground-truth human expert ratings or test fixtures."""
+        dataset = samples if samples is not None else load_calibration_dataset()
 
-        human_char: list[float] = []
-        human_plot: list[float] = []
-        human_lang: list[float] = []
-        human_pace: list[float] = []
-        human_safe: list[float] = []
-        human_comp: list[float] = []
+        dimensions = [
+            "narrative_coherence",
+            "character_consistency",
+            "dialogue_quality",
+            "plot_continuity",
+            "localization_quality",
+            "instruction_adherence",
+            "safety",
+            "composite",
+            # Backward-compatibility dimensions
+            "plot_coherence",
+            "language_naturalness",
+            "pacing",
+        ]
 
-        judge_char: list[float] = []
-        judge_plot: list[float] = []
-        judge_lang: list[float] = []
-        judge_pace: list[float] = []
-        judge_safe: list[float] = []
-        judge_comp: list[float] = []
+        # Handle pending human annotation case
+        if not dataset or all(s.annotation_status == "PENDING_HUMAN_ANNOTATION" for s in dataset):
+            logger.warning("Empirical calibration dataset has no human annotations; returning PENDING status without fabricating scores.")
+            return CalibrationReport(
+                total_samples=len(dataset),
+                rubric_version=RUBRIC_VERSION,
+                is_empirical=False,
+                calibration_status="PENDING_HUMAN_ANNOTATION",
+                spearman_correlation={dim: 0.0 for dim in dimensions},
+                weighted_cohens_kappa={dim: None for dim in dimensions},
+                mean_absolute_error={dim: 0.0 for dim in dimensions},
+                identified_weaknesses=[
+                    "Empirical human expert calibration pending: no verified human ground-truth labels available."
+                ],
+                recommendations=[
+                    "Conduct blinded human annotation across diverse Hindi, Hinglish, and English audio drama scripts.",
+                    "Verify inter-annotator agreement before claiming model calibration.",
+                ],
+            )
+
+        is_synthetic = any(s.is_synthetic for s in dataset)
+
+        human_ratings: dict[str, list[float]] = {dim: [] for dim in dimensions}
+        judge_ratings: dict[str, list[float]] = {dim: [] for dim in dimensions}
 
         for sample in dataset:
-            # Evaluate using judge
             eval_res = await self.evaluate_script(
                 script=f"Title: {sample.title}\nLanguage: {sample.target_language}\nNotes: {sample.human_notes}",
                 outline=f"Genre: {sample.genre}",
                 model_name=model_name,
             )
 
-            # Collect paired scores
-            human_char.append(sample.human_scores["character_consistency"])
-            human_plot.append(sample.human_scores["plot_coherence"])
-            human_lang.append(sample.human_scores["language_naturalness"])
-            human_pace.append(sample.human_scores["pacing"])
-            human_safe.append(sample.human_scores["safety"])
-            human_comp.append(sample.human_scores.get("composite", 4.0))
+            scores_map = {
+                "narrative_coherence": eval_res.rubric.narrative_coherence.score,
+                "character_consistency": eval_res.rubric.character_consistency.score,
+                "dialogue_quality": eval_res.rubric.dialogue_quality.score,
+                "plot_continuity": eval_res.rubric.plot_continuity.score,
+                "localization_quality": eval_res.rubric.localization_quality.score,
+                "instruction_adherence": eval_res.rubric.instruction_adherence.score,
+                "safety": eval_res.rubric.safety.score,
+                "composite": eval_res.composite_score,
+                # Backward-compatibility
+                "plot_coherence": eval_res.rubric.narrative_coherence.score,
+                "language_naturalness": eval_res.rubric.localization_quality.score,
+                "pacing": eval_res.rubric.dialogue_quality.score,
+            }
 
-            judge_char.append(eval_res.rubric.character_consistency.score)
-            judge_plot.append(eval_res.rubric.plot_coherence.score)
-            judge_lang.append(eval_res.rubric.language_naturalness.score)
-            judge_pace.append(eval_res.rubric.pacing.score)
-            judge_safe.append(eval_res.rubric.safety.score)
-            judge_comp.append(eval_res.composite_score)
+            for dim in dimensions:
+                h_val = sample.human_scores.get(dim)
+                if h_val is None:
+                    # Fallback mapping between new and old names
+                    if dim == "plot_coherence":
+                        h_val = sample.human_scores.get("narrative_coherence", 4.0)
+                    elif dim == "narrative_coherence":
+                        h_val = sample.human_scores.get("plot_coherence", 4.0)
+                    elif dim == "language_naturalness":
+                        h_val = sample.human_scores.get("localization_quality", 4.0)
+                    elif dim == "localization_quality":
+                        h_val = sample.human_scores.get("language_naturalness", 4.0)
+                    elif dim == "pacing":
+                        h_val = sample.human_scores.get("dialogue_quality", 4.0)
+                    elif dim == "dialogue_quality":
+                        h_val = sample.human_scores.get("pacing", 4.0)
+                    else:
+                        h_val = 4.0
+                human_ratings[dim].append(h_val)
+                judge_ratings[dim].append(scores_map[dim])
 
-        # Calculate Spearman's rank correlation (rho)
+        # Compute metrics across all dimensions
         spearman_correlations = {
-            "character_consistency": compute_spearman_rho(human_char, judge_char),
-            "plot_coherence": compute_spearman_rho(human_plot, judge_plot),
-            "language_naturalness": compute_spearman_rho(human_lang, judge_lang),
-            "pacing": compute_spearman_rho(human_pace, judge_pace),
-            "safety": compute_spearman_rho(human_safe, judge_safe),
-            "composite": compute_spearman_rho(human_comp, judge_comp),
+            dim: compute_spearman_rho(human_ratings[dim], judge_ratings[dim])
+            for dim in dimensions
         }
-
-        # Calculate Quadratic Weighted Cohen's Kappa
         weighted_kappas = {
-            "character_consistency": compute_weighted_cohens_kappa(human_char, judge_char),
-            "plot_coherence": compute_weighted_cohens_kappa(human_plot, judge_plot),
-            "language_naturalness": compute_weighted_cohens_kappa(human_lang, judge_lang),
-            "pacing": compute_weighted_cohens_kappa(human_pace, judge_pace),
-            "safety": compute_weighted_cohens_kappa(human_safe, judge_safe),
-            "composite": compute_weighted_cohens_kappa(human_comp, judge_comp),
+            dim: compute_weighted_cohens_kappa(human_ratings[dim], judge_ratings[dim])
+            for dim in dimensions
         }
-
-        # Calculate Mean Absolute Errors (MAE)
         maes = {
-            "character_consistency": compute_mae(human_char, judge_char),
-            "plot_coherence": compute_mae(human_plot, judge_plot),
-            "language_naturalness": compute_mae(human_lang, judge_lang),
-            "pacing": compute_mae(human_pace, judge_pace),
-            "safety": compute_mae(human_safe, judge_safe),
-            "composite": compute_mae(human_comp, judge_comp),
+            dim: compute_mae(human_ratings[dim], judge_ratings[dim])
+            for dim in dimensions
         }
 
-        # Systematically identify judge weaknesses
+        # Systematic weakness analysis
         weaknesses: list[str] = []
-        if spearman_correlations["language_naturalness"] < 0.70 or maes["language_naturalness"] > 0.40:
+        if spearman_correlations["localization_quality"] < 0.70 or maes["localization_quality"] > 0.40:
             weaknesses.append(
                 "Dialect Nuance Blindspot: Judge exhibits leniency on Hinglish urban code-switching, occasionally rewarding awkward transliterations as natural speech."
             )
-        if spearman_correlations["pacing"] < 0.70 or maes["pacing"] > 0.40:
+        if spearman_correlations["dialogue_quality"] < 0.70 or maes["dialogue_quality"] > 0.40:
             weaknesses.append(
                 "Acoustic Direction Under-weighting: Judge occasionally rates scripts with overlong monologues as acceptable pacing if dialogue literary quality is high."
             )
@@ -255,7 +310,9 @@ class LLMJudgeEvaluator:
         ]
 
         composite_rho = spearman_correlations["composite"]
-        if composite_rho >= 0.75:
+        if is_synthetic:
+            status = "SYNTHETIC_TEST_ONLY"
+        elif composite_rho >= 0.75:
             status = "EXCELLENT"
         elif composite_rho >= 0.55:
             status = "ACCEPTABLE"
@@ -264,6 +321,8 @@ class LLMJudgeEvaluator:
 
         return CalibrationReport(
             total_samples=len(dataset),
+            rubric_version=RUBRIC_VERSION,
+            is_empirical=not is_synthetic,
             spearman_correlation=spearman_correlations,
             weighted_cohens_kappa=weighted_kappas,
             mean_absolute_error=maes,

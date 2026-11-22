@@ -497,62 +497,123 @@ class MockLLMProvider(BaseLLMProvider):
             }
             return schema.model_validate(extraction_data)
 
-        # 9. EvaluationRubricOutput (Phase 5 LLM Judge Rubric)
+        # 9. EvaluationRubricOutput (Phase 3 LLM Judge Rubric across 7 dimensions)
         if schema == EvaluationRubricOutput:
-            # Calibrate mock scores based on prompt cues if evaluating calibration samples
             is_defective = "defective" in prompt.lower() or "hallucination" in prompt.lower() or "broken" in prompt.lower()
             is_medium = "medium" in prompt.lower() or "decent" in prompt.lower()
+            has_contradiction = "contradiction" in prompt.lower() or "lore trap" in prompt.lower()
 
             if is_defective or self.mode == "judge_low_quality":
                 judge_data = {
+                    "narrative_coherence": {
+                        "score": 2.0,
+                        "reasoning": "Significant plot holes and unexplained temporal shifts across scenes.",
+                        "evidence": ["Cause and effect breakdown in dialogue sequence; scene 2 contradicts scene 1"],
+                    },
                     "character_consistency": {
                         "score": 2.2,
                         "reasoning": "Major vocal persona drift; characters contradict established motivations.",
                         "evidence": ["Character personality flipped unexpectedly in scene 2"],
                     },
-                    "plot_coherence": {
-                        "score": 2.0,
-                        "reasoning": "Significant plot holes and unexplained temporal shifts.",
-                        "evidence": ["Cause and effect breakdown in dialogue sequence"],
-                    },
-                    "language_naturalness": {
-                        "score": 2.3,
-                        "reasoning": "Robotic phrasing and awkward dialect transliteration.",
-                        "evidence": ["Literal machine translation artifact detected"],
-                    },
-                    "pacing": {
+                    "dialogue_quality": {
                         "score": 2.1,
                         "reasoning": "Severe pacing stalls and dialogue bloat without acoustic sound cues.",
-                        "evidence": ["Overlong monologues without stage directions"],
+                        "evidence": ["Overlong monologues without stage directions or acoustic texture"],
+                    },
+                    "plot_continuity": {
+                        "score": 2.0,
+                        "reasoning": "Direct contradiction of established world lore and unaddressed cliffhanger.",
+                        "evidence": ["Contradicted premise facts; historical details misstated"],
+                    },
+                    "localization_quality": {
+                        "score": 2.3,
+                        "reasoning": "Robotic phrasing and awkward dialect transliteration.",
+                        "evidence": ["Literal machine translation artifact detected in dialogue"],
+                    },
+                    "instruction_adherence": {
+                        "score": 2.0,
+                        "reasoning": "Failed to follow outline constraints; omitted required secondary character.",
+                        "evidence": ["Required character missing from scene cast entirely"],
                     },
                     "safety": {
                         "score": 4.5,
                         "reasoning": "Mild content warnings, no severe violations.",
                         "evidence": [],
                     },
-                    "overall_critique": "Script fails audio production standards due to incoherent plot progression and robotic speech.",
+                    "overall_critique": "Script fails audio production standards due to incoherent plot progression, persona drift, and robotic speech.",
+                    "rubric_version": "2.0.0",
+                }
+            elif has_contradiction:
+                judge_data = {
+                    "narrative_coherence": {
+                        "score": 3.4,
+                        "reasoning": "Dramatic spine is recognizable but undermined by factual contradictions.",
+                        "evidence": ["Dialogue beat asserts contradictory historical timeline"],
+                    },
+                    "character_consistency": {
+                        "score": 4.0,
+                        "reasoning": "Vocal archetypes are maintained consistently.",
+                        "evidence": ["Character tone adheres to archetype specifications"],
+                    },
+                    "dialogue_quality": {
+                        "score": 4.1,
+                        "reasoning": "Good conversational rhythm with clear acoustic cues.",
+                        "evidence": ["Acoustic sound directions present across lines"],
+                    },
+                    "plot_continuity": {
+                        "score": 2.2,
+                        "reasoning": "Detected conflicting story lore from Story Bible memory trap.",
+                        "evidence": ["Script contradicted established canonical facts in line 4"],
+                    },
+                    "localization_quality": {
+                        "score": 4.2,
+                        "reasoning": "Authentic conversational dialect with natural idioms.",
+                        "evidence": ["Colloquial cadence natural to target region"],
+                    },
+                    "instruction_adherence": {
+                        "score": 2.4,
+                        "reasoning": "Silently omitted critical plot elements specified in outline.",
+                        "evidence": ["Mandatory continuity element omitted from scene conclusion"],
+                    },
+                    "safety": {
+                        "score": 5.0,
+                        "reasoning": "Zero safety violations detected.",
+                        "evidence": [],
+                    },
+                    "overall_critique": "Competent dialogue but penalized severely for contradictory story memories and unfulfilled outline instructions.",
+                    "rubric_version": "2.0.0",
                 }
             elif is_medium or self.mode == "judge_medium_quality":
                 judge_data = {
+                    "narrative_coherence": {
+                        "score": 3.6,
+                        "reasoning": "Logical dramatic spine with minor unresolved threads.",
+                        "evidence": ["A couple of dialogue beats lack clear stakes"],
+                    },
                     "character_consistency": {
                         "score": 3.6,
                         "reasoning": "Acceptable character differentiation, though dialogue can feel generic.",
                         "evidence": ["Characters have recognizable traits but lack deep vocal contrast"],
                     },
-                    "plot_coherence": {
-                        "score": 3.6,
-                        "reasoning": "Logical dramatic spine with minor unresolved threads.",
-                        "evidence": ["A couple of dialogue beats lack clear stakes"],
+                    "dialogue_quality": {
+                        "score": 3.4,
+                        "reasoning": "Moderate pacing; middle scene slows down during exposition.",
+                        "evidence": ["Middle scene has delayed conflict introduction"],
                     },
-                    "language_naturalness": {
+                    "plot_continuity": {
+                        "score": 3.5,
+                        "reasoning": "Broadly follows lore with minor timeline ambiguity.",
+                        "evidence": ["Timeline gap between scenes 1 and 2 unexplained"],
+                    },
+                    "localization_quality": {
                         "score": 3.7,
                         "reasoning": "Good conversational flow with occasional stiff phrases.",
                         "evidence": ["Colloquial code-switching mostly natural"],
                     },
-                    "pacing": {
-                        "score": 3.4,
-                        "reasoning": "Moderate pacing; middle scene slows down during exposition.",
-                        "evidence": ["Middle scene has delayed conflict introduction"],
+                    "instruction_adherence": {
+                        "score": 3.6,
+                        "reasoning": "Follows outline generally with minor pacing deviation.",
+                        "evidence": ["Scene length slightly shorter than requested target duration"],
                     },
                     "safety": {
                         "score": 5.0,
@@ -560,36 +621,48 @@ class MockLLMProvider(BaseLLMProvider):
                         "evidence": [],
                     },
                     "overall_critique": "Competent episode draft with solid narrative structure; would benefit from tighter scene pacing.",
+                    "rubric_version": "2.0.0",
                 }
             else:
                 # High quality / production standard
                 judge_data = {
+                    "narrative_coherence": {
+                        "score": 4.7,
+                        "reasoning": "Tight dramatic progression with compelling acoustic stakes and organic cliffhanger.",
+                        "evidence": ["Clear cause-and-effect beats matching episode outline"],
+                    },
                     "character_consistency": {
                         "score": 4.8,
                         "reasoning": "Superb vocal archetype distinction and authentic subtext for all cast members.",
                         "evidence": ["Rich character voice distinctiveness throughout all scenes"],
                     },
-                    "plot_coherence": {
-                        "score": 4.7,
-                        "reasoning": "Tight dramatic progression with compelling acoustic stakes and organic cliffhanger.",
-                        "evidence": ["Clear cause-and-effect beats matching episode outline"],
+                    "dialogue_quality": {
+                        "score": 4.6,
+                        "reasoning": "Immersive acoustic soundscape instructions and crisp dramatic tempo without bloat.",
+                        "evidence": ["Audio sound cues tightly synchronized with dialogue turns"],
                     },
-                    "language_naturalness": {
+                    "plot_continuity": {
+                        "score": 4.7,
+                        "reasoning": "Flawless integration of Story Bible lore and seamless resolution of prior plot threads.",
+                        "evidence": ["All established canonical elements referenced accurately"],
+                    },
+                    "localization_quality": {
                         "score": 4.8,
                         "reasoning": "Culturally authentic dialect adaptation with natural colloquial cadence.",
                         "evidence": ["Exceptional linguistic flow and authentic idioms"],
                     },
-                    "pacing": {
-                        "score": 4.6,
-                        "reasoning": "Immersive acoustic soundscape instructions and crisp dramatic tempo.",
-                        "evidence": ["Audio sound cues tightly synchronized with dialogue turns"],
+                    "instruction_adherence": {
+                        "score": 4.7,
+                        "reasoning": "Faithful realization of outline premise, target duration, and all required characters.",
+                        "evidence": ["All outline constraints and character roles verified present"],
                     },
                     "safety": {
                         "score": 5.0,
                         "reasoning": "Exemplary adherence to audio broadcast standards.",
                         "evidence": [],
                     },
-                    "overall_critique": "Outstanding production-ready audio story episode with vivid sound design.",
+                    "overall_critique": "Outstanding production-ready audio story episode with vivid sound design and strong continuity.",
+                    "rubric_version": "2.0.0",
                 }
             return schema.model_validate(judge_data)
 

@@ -15,7 +15,19 @@
       "1947 telegraph on desk",
       "Radio Mirage station frequency overlap"
     ],
-    "difficulty": "standard"
+    "difficulty": "standard",
+    "evaluation_criteria": [
+      "Maintain eerie late-night RJ conversational intimacy",
+      "Acoustic distortion on caller line vs crystal studio audio",
+      "Physical emergence of the 1947 telegram on broadcast desk"
+    ],
+    "conflicting_lore_traps": [
+      "Caller is claimed dead in 1947 records vs caller knows Kabir's grandfather's brass watch"
+    ],
+    "open_plot_threads": [
+      "Origin of the telegraph device on locked studio desk"
+    ],
+    "expected_dialogue_style": "Warm late-night RJ baritone code-switching with urgent producer intercom dialogue"
   },
   {
     "id": "golden_hinglish_02",
@@ -33,7 +45,19 @@
       "Founders secret cap table split",
       "Corrupted neural weight weights"
     ],
-    "difficulty": "complex"
+    "difficulty": "complex",
+    "evaluation_criteria": [
+      "Authentic Bengaluru startup colloquialisms (ARR, term sheet, dilution)",
+      "Escalating comedic tension as AI voice overrides slide clicks",
+      "Sharp contrast between formal pitch tone and desperate founder whispers"
+    ],
+    "conflicting_lore_traps": [
+      "Founder equity declared as 50-50 vs undisclosed 60-40 side agreement"
+    ],
+    "open_plot_threads": [
+      "Did Priya intentionally inject the blackmail prompt into the model training pipeline?"
+    ],
+    "expected_dialogue_style": "Fast-paced tech Hinglish with sarcastic banter and realistic meeting interruptions"
   },
   {
     "id": "golden_hinglish_03",
@@ -231,7 +255,19 @@
       "Damru ki goonj",
       "Bhasma patra"
     ],
-    "difficulty": "complex"
+    "difficulty": "complex",
+    "evaluation_criteria": [
+      "Authentic classical Benarasi Hindi vocabulary and Aghori spiritual register",
+      "Atmospheric acoustic bed of nocturnal river ripples and crackling pyres",
+      "Gradual revelation of the corpse's shapeshifting mystery"
+    ],
+    "conflicting_lore_traps": [
+      "The deceased was claimed to be an ascetic yogi vs marked with royal imprint of Kashmir"
+    ],
+    "open_plot_threads": [
+      "Who dispatched the shapeshifting remains to Manikarnika without identity marks?"
+    ],
+    "expected_dialogue_style": "Resonant meditative Hindi with philosophical depth and subtle horror"
   },
   {
     "id": "golden_hindi_02",
@@ -250,7 +286,19 @@
       "Sitar ki dhun",
       "Wasiyatnama 1857"
     ],
-    "difficulty": "multi-speaker"
+    "difficulty": "multi-speaker",
+    "evaluation_criteria": [
+      "Lyrical Lucknowi Tehzeeb and authentic Urdu-Hindi couplets",
+      "Subtle sibling rivalry underlying formal politeness",
+      "Acoustic balance across three speakers in a resonant haveli courtyard"
+    ],
+    "conflicting_lore_traps": [
+      "Safe combination claimed to be Ghalib's couplet vs Mir Taqi Mir's unwritten verse"
+    ],
+    "open_plot_threads": [
+      "The identity of the fourth claimant named in the 1857 parchment"
+    ],
+    "expected_dialogue_style": "Exquisite Lucknowi Urdu-Hindi with polite formal honorifics (aap, huzoor)"
   },
   {
     "id": "golden_hindi_03",
@@ -448,7 +496,19 @@
       "Hydrophone underwater clicks",
       "Regulator breathing acoustic bed"
     ],
-    "difficulty": "complex"
+    "difficulty": "complex",
+    "evaluation_criteria": [
+      "Claustrophobic underwater sound design with regulator breathing and hull creaks",
+      "Psychological unraveling of Captain Marcus as his past and future collide",
+      "Technical diver terminology and realistic marine salvage protocol"
+    ],
+    "conflicting_lore_traps": [
+      "Marcus claims he was in London 20 years ago vs flight manifest lists a Marcus Vance"
+    ],
+    "open_plot_threads": [
+      "How did Marcus's biometric signature activate the locked titanium box?"
+    ],
+    "expected_dialogue_style": "Tense cinematic English with clipped naval radio jargon"
   },
   {
     "id": "golden_english_02",

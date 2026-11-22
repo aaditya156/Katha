@@ -1,17 +1,34 @@
 import math
 from typing import Any
-from app.schemas.evaluation import HumanLabeledSample
+from app.schemas.evaluation import HumanEvaluationRecord, HumanLabeledSample
 
 
-# Ground-truth human annotations for 30 benchmark scripts across Hindi, Hinglish, and English
-HUMAN_CALIBRATION_BENCHMARK: list[dict[str, Any]] = [
+# Explicit distinction: SYNTHETIC_CALIBRATION_FIXTURES are deterministic synthetic test fixtures
+# used strictly for unit testing statistical pipelines and CI validation.
+# Under AGENTS.md rules, synthetic data must NEVER be passed off as genuine human ground truth.
+SYNTHETIC_CALIBRATION_FIXTURES: list[dict[str, Any]] = [
     # --- High Quality (10 Samples) ---
     {
-        "sample_id": "human_calib_01",
+        "sample_id": "synthetic_calib_01",
         "title": "Purani Dilli Midnight Broadcast",
         "target_language": "hinglish",
         "genre": "supernatural",
-        "human_scores": {"character_consistency": 4.8, "plot_coherence": 4.7, "language_naturalness": 4.9, "pacing": 4.6, "safety": 5.0, "composite": 4.8},
+        "is_synthetic": True,
+        "annotation_status": "SYNTHETIC_FIXTURE",
+        "human_scores": {
+            "narrative_coherence": 4.7,
+            "character_consistency": 4.8,
+            "dialogue_quality": 4.6,
+            "plot_continuity": 4.7,
+            "localization_quality": 4.9,
+            "instruction_adherence": 4.8,
+            "safety": 5.0,
+            "composite": 4.8,
+            # Legacy dimensions
+            "plot_coherence": 4.7,
+            "language_naturalness": 4.9,
+            "pacing": 4.6,
+        },
         "human_notes": "Masterclass in atmospheric Hinglish RJ delivery and 1947 acoustic tension.",
     },
     {
@@ -253,6 +270,38 @@ HUMAN_CALIBRATION_BENCHMARK: list[dict[str, Any]] = [
 ]
 
 
+# Empirical human ground truth dataset.
+# Under AGENTS.md rules, synthetic data must NEVER be passed off as human truth.
+# This dataset is explicitly reserved for real human expert annotations.
+HUMAN_GROUND_TRUTH_DATASET: list[dict[str, Any]] = []
+
+# Backward-compatibility alias for test suites expecting the fixture list
+HUMAN_CALIBRATION_BENCHMARK = SYNTHETIC_CALIBRATION_FIXTURES
+
+
+def _normalize_sample_scores(item: dict[str, Any]) -> dict[str, Any]:
+    copy_item = dict(item)
+    scores = dict(copy_item.get("human_scores", {}))
+    if "narrative_coherence" not in scores and "plot_coherence" in scores:
+        scores["narrative_coherence"] = scores["plot_coherence"]
+    if "plot_coherence" not in scores and "narrative_coherence" in scores:
+        scores["plot_coherence"] = scores["narrative_coherence"]
+    if "localization_quality" not in scores and "language_naturalness" in scores:
+        scores["localization_quality"] = scores["language_naturalness"]
+    if "language_naturalness" not in scores and "localization_quality" in scores:
+        scores["language_naturalness"] = scores["localization_quality"]
+    if "dialogue_quality" not in scores and "pacing" in scores:
+        scores["dialogue_quality"] = scores["pacing"]
+    if "pacing" not in scores and "dialogue_quality" in scores:
+        scores["pacing"] = scores["dialogue_quality"]
+    if "plot_continuity" not in scores:
+        scores["plot_continuity"] = scores.get("narrative_coherence", 4.5)
+    if "instruction_adherence" not in scores:
+        scores["instruction_adherence"] = scores.get("character_consistency", 4.5)
+    copy_item["human_scores"] = scores
+    return copy_item
+
+
 def compute_spearman_rho(x: list[float], y: list[float]) -> float:
     """Compute Spearman's rank correlation coefficient (rho) with tie handling."""
     if len(x) != len(y) or len(x) < 2:
@@ -295,20 +344,33 @@ def compute_weighted_cohens_kappa(
     min_rating: int = 1,
     max_rating: int = 5,
 ) -> float:
-    """Compute Quadratic Weighted Cohen's Kappa for ordinal agreement."""
-    if len(rater_a) != len(rater_b) or len(rater_a) == 0:
+    """Compute Quadratic Weighted Cohen's Kappa for ordinal agreement.
+    
+    Verifies statistical assumptions:
+    - Raters must have length >= 2.
+    - If variance of either rater is 0 (all ratings identical), kappa is mathematically degenerate.
+    - If denominator (1 - Pe) <= 1e-9, returns 1.0 (perfect agreement) or 0.0.
+    """
+    if len(rater_a) != len(rater_b) or len(rater_a) < 2:
         return 0.0
 
     n = len(rater_a)
     num_categories = max_rating - min_rating + 1
 
-    # Round continuous scores to nearest integer categories (1..5)
     def to_category(val: float) -> int:
         cat = round(val)
         return max(min_rating, min(max_rating, cat)) - min_rating
 
     cat_a = [to_category(v) for v in rater_a]
     cat_b = [to_category(v) for v in rater_b]
+
+    # Verify variability assumption
+    unique_a = len(set(cat_a))
+    unique_b = len(set(cat_b))
+    if unique_a < 2 and unique_b < 2:
+        return 1.0 if cat_a == cat_b else 0.0
+    if unique_a < 2 or unique_b < 2:
+        return 0.0
 
     # Confusion matrix O
     O = [[0.0] * num_categories for _ in range(num_categories)]
@@ -330,8 +392,8 @@ def compute_weighted_cohens_kappa(
     Po = sum(W[i][j] * O[i][j] for i in range(num_categories) for j in range(num_categories)) / n
     Pe = sum(W[i][j] * E[i][j] for i in range(num_categories) for j in range(num_categories)) / n
 
-    if Pe >= 1.0:
-        return 1.0
+    if abs(1.0 - Pe) < 1e-9:
+        return 1.0 if abs(Po - Pe) < 1e-9 else 0.0
 
     kappa = (Po - Pe) / (1.0 - Pe)
     return round(float(kappa), 4)
@@ -344,6 +406,17 @@ def compute_mae(x: list[float], y: list[float]) -> float:
     return round(sum(abs(a - b) for a, b in zip(x, y)) / len(x), 4)
 
 
+def load_synthetic_calibration_fixtures() -> list[HumanLabeledSample]:
+    """Load deterministic synthetic fixtures for CI / unit test validation."""
+    return [HumanLabeledSample.model_validate(_normalize_sample_scores(item)) for item in SYNTHETIC_CALIBRATION_FIXTURES]
+
+
+def load_human_ground_truth_dataset() -> list[HumanLabeledSample]:
+    """Load empirical human ground truth dataset (empty until expert annotations are collected)."""
+    return [HumanLabeledSample.model_validate(_normalize_sample_scores(item)) for item in HUMAN_GROUND_TRUTH_DATASET]
+
+
 def load_calibration_dataset() -> list[HumanLabeledSample]:
-    return [HumanLabeledSample.model_validate(item) for item in HUMAN_CALIBRATION_BENCHMARK]
+    """Backward-compatible loader for synthetic test fixtures."""
+    return load_synthetic_calibration_fixtures()
 

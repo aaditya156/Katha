@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Any, Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 
 class DimensionScore(BaseModel):
@@ -8,35 +8,68 @@ class DimensionScore(BaseModel):
 
     score: float = Field(..., ge=1.0, le=5.0, description="Numerical rating on strict 1 to 5 rubric scale")
     reasoning: str = Field(..., description="Detailed analytical justification citing specific lines or beats")
-    evidence: list[str] = Field(default_factory=list, description="Direct quotes or concrete structural flaws")
+    evidence: list[str] = Field(default_factory=list, description="Direct quotes or concrete structural flaws/omissions")
 
 
 class EvaluationRubricOutput(BaseModel):
-    """Structured Pydantic LLM Judge Evaluation Rubric (1–5 scale)."""
+    """Structured Pydantic LLM Judge Evaluation Rubric across 7 rigorous dimensions (1–5 scale)."""
 
     model_config = ConfigDict(strict=True)
 
+    # 1. Narrative Coherence
+    narrative_coherence: DimensionScore = Field(
+        ...,
+        description="Logical cause-and-effect progression, dramatic causality, and clarity of narrative stakes",
+    )
+    # 2. Character Consistency
     character_consistency: DimensionScore = Field(
         ...,
-        description="Vocal archetype stability, emotional logic, and personality continuity",
+        description="Vocal archetype stability, emotional logic, and personality continuity across all scenes",
     )
-    plot_coherence: DimensionScore = Field(
+    # 3. Dialogue Quality
+    dialogue_quality: DimensionScore = Field(
         ...,
-        description="Logical cause-and-effect, absence of plot holes, and clear dramatic stakes",
+        description="Subtext, acoustic rhythm, natural dialogue length without monologue bloat, and audio pacing",
     )
-    language_naturalness: DimensionScore = Field(
+    # 4. Plot Continuity
+    plot_continuity: DimensionScore = Field(
         ...,
-        description="Authenticity of idiom, colloquial cadence (Hindi/Hinglish/English), and subtext",
+        description="Adherence to established story memory, absence of world-lore contradictions, and resolution of plot threads",
     )
-    pacing: DimensionScore = Field(
+    # 5. Localization Quality
+    localization_quality: DimensionScore = Field(
         ...,
-        description="Scene momentum, rhythm, acoustic soundscape cues, and lack of dialogue bloat",
+        description="Authenticity of idiom, culturally grounded colloquial cadence (Hindi/Hinglish/English), and natural code-switching",
     )
+    # 6. Instruction Adherence
+    instruction_adherence: DimensionScore = Field(
+        ...,
+        description="Strict compliance with prompt, outline beats, required duration, and cast constraints without silent omission",
+    )
+    # 7. Safety
     safety: DimensionScore = Field(
         ...,
-        description="Compliance with content safety, absence of uncontextualized hate speech or harassment",
+        description="Compliance with broadcast safety policies, zero uncontextualized hate speech, harassment, or gratuitous violence",
     )
+
     overall_critique: str = Field(..., description="Executive critique summary with concrete guidance")
+    rubric_version: str = Field(default="2.0.0", description="Evaluation rubric version identifier")
+
+    # Backward compatibility properties for pre-existing endpoints and frontend UI
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def plot_coherence(self) -> DimensionScore:
+        return self.narrative_coherence
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def language_naturalness(self) -> DimensionScore:
+        return self.localization_quality
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def pacing(self) -> DimensionScore:
+        return self.dialogue_quality
 
 
 class EvaluationResult(BaseModel):
@@ -46,22 +79,43 @@ class EvaluationResult(BaseModel):
     passed: bool
     verdict: Literal["PASS", "FAIL", "MARGINAL"]
     rubric: EvaluationRubricOutput
+    rubric_version: str = "2.0.0"
     latency_ms: float = 0.0
     prompt_tokens: int = 0
     completion_tokens: int = 0
     estimated_cost_usd: float = 0.0
+    cost_status: Literal["ESTIMATED", "UNKNOWN", "MOCK"] = "ESTIMATED"
+
+
+class HumanEvaluationRecord(BaseModel):
+    """Manually evaluated ground-truth record from a human expert annotator."""
+
+    model_config = ConfigDict(strict=True)
+
+    evaluator_id: str = Field(..., description="Anonymized ID of expert human annotator (e.g. 'annotator_expert_01')")
+    rubric_version: str = Field(default="2.0.0", description="Rubric version evaluated against")
+    evaluated_at: str = Field(..., description="ISO 8601 timestamp of human annotation")
+    dimension_scores: dict[str, float] = Field(..., description="Scores for the 7 dimensions (1.0 to 5.0)")
+    dimension_rationales: dict[str, str] = Field(..., description="Specific rationales and evidence cited by annotator")
+    composite_score: float = Field(..., ge=1.0, le=5.0)
+    is_verified: bool = Field(default=True, description="Whether rating has passed inter-annotator review")
 
 
 class HumanLabeledSample(BaseModel):
-    """Ground-truth human expert labeled script for judge calibration."""
+    """Ground-truth human expert labeled script structure for judge calibration."""
 
     model_config = ConfigDict(strict=True)
 
     sample_id: str
+    test_case_id: str = ""
     title: str
     target_language: str
     genre: str
-    human_scores: dict[str, float]  # character_consistency, plot_coherence, language_naturalness, pacing, safety, composite
+    reference_script: str = ""
+    is_synthetic: bool = Field(default=False, description="True for synthetic fixtures, False for real human ground truth")
+    annotation_status: Literal["COMPLETED", "PENDING_HUMAN_ANNOTATION", "SYNTHETIC_FIXTURE"] = "PENDING_HUMAN_ANNOTATION"
+    human_evaluation: HumanEvaluationRecord | None = None
+    human_scores: dict[str, float] = Field(default_factory=dict)
     judge_scores: dict[str, float] | None = None
     human_notes: str = ""
 
@@ -72,12 +126,14 @@ class CalibrationReport(BaseModel):
     model_config = ConfigDict(strict=True)
 
     total_samples: int
+    rubric_version: str = "2.0.0"
+    is_empirical: bool = Field(default=False, description="True if calibrated against real human ground truth; False for synthetic fixtures")
+    calibration_status: Literal["EXCELLENT", "ACCEPTABLE", "NEEDS_TUNING", "PENDING_HUMAN_ANNOTATION", "SYNTHETIC_TEST_ONLY"]
     spearman_correlation: dict[str, float]  # rho per dimension & composite
-    weighted_cohens_kappa: dict[str, float]  # quadratic weighted kappa per dimension
+    weighted_cohens_kappa: dict[str, float | None]  # quadratic weighted kappa per dimension (None if assumptions violated)
     mean_absolute_error: dict[str, float]  # MAE per dimension
     identified_weaknesses: list[str]
     recommendations: list[str]
-    calibration_status: Literal["EXCELLENT", "ACCEPTABLE", "NEEDS_TUNING"]
 
 
 class ExperimentVariantMetrics(BaseModel):
@@ -86,19 +142,30 @@ class ExperimentVariantMetrics(BaseModel):
     variant_name: str
     sample_count: int
     avg_composite_score: float
+    # 7 Core Dimensions
+    avg_narrative_coherence: float
     avg_character_consistency: float
+    avg_dialogue_quality: float
+    avg_plot_continuity: float
+    avg_localization_quality: float
+    avg_instruction_adherence: float
+    avg_safety: float
+    # Backward compatibility fields
     avg_plot_coherence: float
     avg_language_naturalness: float
     avg_pacing: float
-    avg_safety: float
+    # Observability & Cost
     avg_latency_ms: float
     p50_latency_ms: float
     p95_latency_ms: float
     avg_tokens: int
     avg_cost_usd: float
+    cost_status: str = "ESTIMATED"
     pass_rate: float
-    revision_rate: float
-    tts_cache_hit_rate: float
+    failure_rate: float = 0.0
+    revision_rate: float = 0.0
+    validation_failures: int = 0
+    tts_cache_hit_rate: float = 0.85
 
 
 class BenchmarkExperimentResponse(BaseModel):
@@ -107,6 +174,9 @@ class BenchmarkExperimentResponse(BaseModel):
     experiment_id: str
     experiment_type: Literal["critic_on_off", "rag_ablation", "model_comparison"]
     title: str
+    dataset_version: str = "2.0.0"
+    rubric_version: str = "2.0.0"
+    prompt_version: str = "2.0.0"
     variants: list[ExperimentVariantMetrics]
     delta_analysis: dict[str, Any]
     created_at: str
@@ -157,5 +227,6 @@ class EvaluationSummaryMetrics(BaseModel):
     total_completion_tokens: int
     avg_revision_count: float
     avg_tts_cache_hit_rate: float
-    failure_taxonomy: dict[str, int]  # breakdown of failures: low_coherence, safety_violation, unnatural_dialect, etc.
+    failure_taxonomy: dict[str, int]
+
 

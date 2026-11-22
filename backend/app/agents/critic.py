@@ -36,6 +36,24 @@ async def critic_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
         )
         raise RuntimeError(err_msg)
 
+    # Check for Critic ablation (bypass revisions)
+    if sim_flags.get("disable_critic"):
+        logger.info(f"[{episode_id}] Critic disabled via simulation_flags (Ablation). Bypassing revision loop.")
+        critique = CritiqueReport(
+            overall_score=8.0,
+            passed=True,
+            scene_evaluations=[],
+            failing_scene_numbers=[],
+            feedback="Critic disabled for ablation experiment.",
+        )
+        return {
+            "current_critique": critique,
+            "critic_score": 8.0,
+            "failing_scenes": [],
+            "status": "CRITIQUED",
+            "current_node": "critic",
+        }
+
     raw_script = state.get("raw_script")
     outline = state.get("outline")
 

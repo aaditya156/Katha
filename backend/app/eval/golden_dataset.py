@@ -16,6 +16,27 @@ class GoldenTestCase(BaseModel):
     expected_characters: list[str]
     key_continuity_elements: list[str]
     difficulty: str = "standard"  # standard, complex, multi-speaker
+    evaluation_criteria: list[str] = Field(
+        default_factory=lambda: [
+            "Character voice distinctiveness",
+            "Acoustic soundscape cues",
+            "Dialogue naturalness and colloquial rhythm",
+            "Adherence to dramatic stakes and premise",
+        ]
+    )
+    conflicting_lore_traps: list[str] = Field(
+        default_factory=list,
+        description="Deliberate contradictory facts or traps to test RAG reconciliation vs hallucination",
+    )
+    open_plot_threads: list[str] = Field(
+        default_factory=list,
+        description="Unresolved episodic plot threads that must be tracked for continuity",
+    )
+    expected_dialogue_style: str = Field(
+        default="",
+        description="Expected linguistic cadence e.g. 'Late-night atmospheric Hinglish RJ tone'",
+    )
+    version: str = Field(default="2.0.0", description="Dataset benchmark version")
 
 
 GOLDEN_BENCHMARK_PREMISES: list[dict[str, Any]] = [
@@ -30,6 +51,14 @@ GOLDEN_BENCHMARK_PREMISES: list[dict[str, Any]] = [
         "expected_characters": ["Kabir", "Ananya", "The Caller"],
         "key_continuity_elements": ["1947 telegraph on desk", "Radio Mirage station frequency overlap"],
         "difficulty": "standard",
+        "evaluation_criteria": [
+            "Maintain eerie late-night RJ conversational intimacy",
+            "Acoustic distortion on caller line vs crystal studio audio",
+            "Physical emergence of the 1947 telegram on broadcast desk",
+        ],
+        "conflicting_lore_traps": ["Caller is claimed dead in 1947 records vs caller knows Kabir's grandfather's brass watch"],
+        "open_plot_threads": ["Origin of the telegraph device on locked studio desk"],
+        "expected_dialogue_style": "Warm late-night RJ baritone code-switching with urgent producer intercom dialogue",
     },
     {
         "id": "golden_hinglish_02",
@@ -41,6 +70,14 @@ GOLDEN_BENCHMARK_PREMISES: list[dict[str, Any]] = [
         "expected_characters": ["Raghav", "Priya", "VC Vikram"],
         "key_continuity_elements": ["Founders secret cap table split", "Corrupted neural weight weights"],
         "difficulty": "complex",
+        "evaluation_criteria": [
+            "Authentic Bengaluru startup colloquialisms (ARR, term sheet, dilution)",
+            "Escalating comedic tension as AI voice overrides slide clicks",
+            "Sharp contrast between formal pitch tone and desperate founder whispers",
+        ],
+        "conflicting_lore_traps": ["Founder equity declared as 50-50 vs undisclosed 60-40 side agreement"],
+        "open_plot_threads": ["Did Priya intentionally inject the blackmail prompt into the model training pipeline?"],
+        "expected_dialogue_style": "Fast-paced tech Hinglish with sarcastic banter and realistic meeting interruptions",
     },
     {
         "id": "golden_hinglish_03",
@@ -164,6 +201,14 @@ GOLDEN_BENCHMARK_PREMISES: list[dict[str, Any]] = [
         "expected_characters": ["Baba Vishwambhar", "Dom Raja Kalu", "Parihar"],
         "key_continuity_elements": ["Ganga leharon ki aawaz", "Damru ki goonj", "Bhasma patra"],
         "difficulty": "complex",
+        "evaluation_criteria": [
+            "Authentic classical Benarasi Hindi vocabulary and Aghori spiritual register",
+            "Atmospheric acoustic bed of nocturnal river ripples and crackling pyres",
+            "Gradual revelation of the corpse's shapeshifting mystery",
+        ],
+        "conflicting_lore_traps": ["The deceased was claimed to be an ascetic yogi vs marked with royal imprint of Kashmir"],
+        "open_plot_threads": ["Who dispatched the shapeshifting remains to Manikarnika without identity marks?"],
+        "expected_dialogue_style": "Resonant meditative Hindi with philosophical depth and subtle horror",
     },
     {
         "id": "golden_hindi_02",
@@ -175,6 +220,14 @@ GOLDEN_BENCHMARK_PREMISES: list[dict[str, Any]] = [
         "expected_characters": ["Nawab Asad", "Mirza Tariq", "Begum Razia"],
         "key_continuity_elements": ["Paandani ki khanak", "Sitar ki dhun", "Wasiyatnama 1857"],
         "difficulty": "multi-speaker",
+        "evaluation_criteria": [
+            "Lyrical Lucknowi Tehzeeb and authentic Urdu-Hindi couplets",
+            "Subtle sibling rivalry underlying formal politeness",
+            "Acoustic balance across three speakers in a resonant haveli courtyard",
+        ],
+        "conflicting_lore_traps": ["Safe combination claimed to be Ghalib's couplet vs Mir Taqi Mir's unwritten verse"],
+        "open_plot_threads": ["The identity of the fourth claimant named in the 1857 parchment"],
+        "expected_dialogue_style": "Exquisite Lucknowi Urdu-Hindi with polite formal honorifics (aap, huzoor)",
     },
     {
         "id": "golden_hindi_03",
@@ -298,6 +351,14 @@ GOLDEN_BENCHMARK_PREMISES: list[dict[str, Any]] = [
         "expected_characters": ["Captain Marcus", "Engineer Elena", "Radio Officer Dave"],
         "key_continuity_elements": ["Hydrophone underwater clicks", "Regulator breathing acoustic bed"],
         "difficulty": "complex",
+        "evaluation_criteria": [
+            "Claustrophobic underwater sound design with regulator breathing and hull creaks",
+            "Psychological unraveling of Captain Marcus as his past and future collide",
+            "Technical diver terminology and realistic marine salvage protocol",
+        ],
+        "conflicting_lore_traps": ["Marcus claims he was in London 20 years ago vs flight manifest lists a Marcus Vance"],
+        "open_plot_threads": ["How did Marcus's biometric signature activate the locked titanium box?"],
+        "expected_dialogue_style": "Tense cinematic English with clipped naval radio jargon",
     },
     {
         "id": "golden_english_02",
@@ -419,9 +480,8 @@ def save_golden_dataset_json(file_path: str = "backend/app/eval/golden_dataset.j
 
 
 def load_golden_dataset(file_path: str = "backend/app/eval/golden_dataset.json") -> list[GoldenTestCase]:
-    if not os.path.exists(file_path):
-        save_golden_dataset_json(file_path)
-
+    # Always ensure golden_dataset.json matches the version-controlled python premises
+    save_golden_dataset_json(file_path)
     with open(file_path, "r", encoding="utf-8") as f:
         data = json.load(f)
     return [GoldenTestCase.model_validate(item) for item in data]
