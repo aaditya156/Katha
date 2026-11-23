@@ -37,8 +37,14 @@ async def evaluate_episode(
     db: Annotated[AsyncSession, Depends(get_db)],
     model_name: str = Query(default="gemini-1.5-pro"),
     provider: str = Query(default="gemini"),
+    mode: Literal["LIVE", "MOCK"] = Query(default="MOCK"),
 ) -> EvaluationRunResponse:
     """Evaluate an existing episode using the 7-dimensional LLM Judge and persist metric trace with user ownership."""
+    from fastapi import HTTPException
+    from app.core.exceptions import LLMProviderError
+    from app.providers.factory import get_llm_provider
+    from app.services.evaluator import LLMJudgeEvaluator
+
     episode = await db.scalar(select(Episode).where(Episode.id == episode_id))
     if not episode:
         raise EntityNotFoundException("Episode", episode_id)
@@ -51,7 +57,19 @@ async def evaluate_episode(
     script_content = episode.script or episode.title
     outline_content = episode.outline or episode.premise
 
-    eval_result: EvaluationResult = await evaluator_service.evaluate_script(
+    # Explicit provider construction; fails clearly in LIVE mode when credentials are missing
+    try:
+        judge_llm = get_llm_provider(provider_name=provider, model_name=model_name, mode=mode)
+    except LLMProviderError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to initialize evaluation provider '{provider}' in {mode} mode: {str(exc)}",
+        ) from exc
+
+    # Avoid sharing mutable provider state across concurrent requests
+    judge_evaluator = LLMJudgeEvaluator(llm_provider=judge_llm)
+
+    eval_result: EvaluationResult = await judge_evaluator.evaluate_script(
         script=str(script_content),
         outline=str(outline_content),
         model_name=model_name,
@@ -59,8 +77,8 @@ async def evaluate_episode(
     )
 
     # Determine token usage classification from judge provider metadata
-    last_usage = evaluator_service.llm.get_last_usage()
-    token_usage_type = last_usage.usage_type if last_usage else ("ACTUAL" if provider != "mock" else "MOCK")
+    last_usage = judge_llm.get_last_usage()
+    token_usage_type = last_usage.usage_type if last_usage else ("ACTUAL" if mode == "LIVE" else "MOCK")
 
     run = EvaluationRun(
         user_id=current_user.id,
@@ -76,7 +94,7 @@ async def evaluate_episode(
         token_usage_type=token_usage_type,
         estimated_cost_usd=eval_result.estimated_cost_usd,
         revision_count=0,
-        tts_cache_hit_rate=0.0,
+        tts_cache_hit_rate=None,  # Unmeasured in text evaluation; represented as None/unavailable
         generated_script_text=str(script_content),
         composite_score=eval_result.composite_score,
         character_consistency=eval_result.rubric.character_consistency.score,
@@ -150,7 +168,7 @@ async def get_evaluation_summary(
             total_prompt_tokens=0,
             total_completion_tokens=0,
             avg_revision_count=0.0,
-            avg_tts_cache_hit_rate=0.0,
+            avg_tts_cache_hit_rate=None,
             failure_taxonomy={},
         )
 
@@ -182,6 +200,9 @@ async def get_evaluation_summary(
             if r.safety < 4.0:
                 failure_tax["safety_warning"] = failure_tax.get("safety_warning", 0) + 1
 
+    tts_rates = [r.tts_cache_hit_rate for r in runs if r.tts_cache_hit_rate is not None]
+    avg_tts = round(sum(tts_rates) / len(tts_rates), 2) if tts_rates else None
+
     return EvaluationSummaryMetrics(
         total_runs=n,
         pass_rate=round(passes / n, 2),
@@ -193,7 +214,7 @@ async def get_evaluation_summary(
         total_prompt_tokens=sum(r.prompt_tokens for r in runs),
         total_completion_tokens=sum(r.completion_tokens for r in runs),
         avg_revision_count=round(sum(r.revision_count for r in runs) / n, 2),
-        avg_tts_cache_hit_rate=round(sum(r.tts_cache_hit_rate for r in runs) / n, 2),
+        avg_tts_cache_hit_rate=avg_tts,
         failure_taxonomy=failure_tax,
     )
 

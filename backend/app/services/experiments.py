@@ -467,7 +467,7 @@ class ExperimentRunner:
         pass_count = 0
         validation_failures_total = 0
         revision_count_total = 0
-        cost_status_overall = "ACTUAL" if mode == "LIVE" else "ESTIMATED"
+        cost_status_overall = "MOCK" if mode == "MOCK" else "ESTIMATED"
         runs: list[EvaluationRun] = []
 
         # Instantiate the generation LLM
@@ -550,6 +550,21 @@ class ExperimentRunner:
                     raise AssertionError(f"RAG OFF violation: Planner received unexpected lore context: {planner_rag_ctx[:100]}")
                 if writer_rag_ctx:
                     raise AssertionError(f"RAG OFF violation: Writer received unexpected lore context: {writer_rag_ctx[:100]}")
+            else:
+                if case.key_continuity_elements:
+                    if not planner_rag_ctx:
+                        raise AssertionError(f"RAG ON violation: Planner received no lore context for case '{case.id}'.")
+                    if not writer_rag_ctx:
+                        raise AssertionError(f"RAG ON violation: Writer received no lore context for case '{case.id}'.")
+                    retrieved_match = any(
+                        elem.lower() in planner_rag_ctx.lower() or elem.lower() in writer_rag_ctx.lower()
+                        for elem in case.key_continuity_elements
+                    )
+                    if not retrieved_match:
+                        raise AssertionError(
+                            f"RAG ON violation: Seeded lore elements {case.key_continuity_elements} "
+                            f"not found in retrieved context for case '{case.id}'."
+                        )
 
             # 5. Format actual generated script and extract actual revisions & validation errors
             generated_script_text = format_script_for_eval(final_state)
@@ -644,7 +659,7 @@ class ExperimentRunner:
                 completion_tokens=total_completion_tokens,
                 estimated_cost_usd=total_cost_usd,
                 revision_count=revisions,
-                tts_cache_hit_rate=0.0,  # Explicitly 0.0 / unmeasured rather than fabricated
+                tts_cache_hit_rate=None,  # Unmeasured in text generation experiments
                 composite_score=composite_score,
                 character_consistency=char_score,
                 plot_coherence=narr_score,
@@ -657,6 +672,8 @@ class ExperimentRunner:
                 node_latencies_json={
                     "generation_latency_ms": round(gen_latency_ms, 1),
                     "evaluation_latency_ms": round(eval_latency_ms, 1),
+                    "rag_context_planner": planner_rag_ctx,
+                    "rag_context_writer": writer_rag_ctx,
                     "usage_breakdown": {
                         "generation": {
                             "model": gen_usage.model or model_name,

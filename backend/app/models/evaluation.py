@@ -52,7 +52,7 @@ class EvaluationRun(Base, UUIDMixin, TimestampMixin):
     token_usage_type: Mapped[str] = mapped_column(String(20), default="ESTIMATED", nullable=False)  # ACTUAL, ESTIMATED, MOCK
     estimated_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
     revision_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    tts_cache_hit_rate: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    tts_cache_hit_rate: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     generated_script_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Evaluation quality scores (1.0 to 5.0 scale per AGENTS.md / Rubric)

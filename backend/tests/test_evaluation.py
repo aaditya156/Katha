@@ -769,3 +769,106 @@ async def test_metric_truthfulness_no_fabricated_tts(db_session: AsyncSession, t
     assert res.delta_analysis["cases_improved"] + res.delta_analysis["cases_regressed"] + res.delta_analysis["cases_unchanged"] == 1
 
 
+@pytest.mark.asyncio
+async def test_individual_evaluation_mock_and_live_credentials(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    db_session: AsyncSession,
+    test_user: User,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify individual episode evaluation explicit provider/mode construction and fail-fast credentials."""
+    # Setup test series & episode
+    series = Series(
+        title="Eval Series Modes",
+        logline="Testing eval API modes",
+        genre="Drama",
+        user_id=test_user.id,
+    )
+    db_session.add(series)
+    await db_session.flush()
+
+    episode = Episode(
+        series_id=series.id,
+        episode_number=1,
+        title="Mode Episode",
+        premise="Test Premise",
+        script="Speaker 1: Namaste!\nSpeaker 2: Kaise hain aap?",
+        outline="Test outline",
+    )
+    db_session.add(episode)
+    await db_session.commit()
+
+    # 1. MOCK mode succeeds, tts_cache_hit_rate is None (unmeasured)
+    resp_mock = await client.post(
+        f"/api/v1/evaluations/episodes/{episode.id}/evaluate?mode=MOCK&provider=mock&model_name=mock-model",
+        headers=auth_headers,
+    )
+    assert resp_mock.status_code == 201
+    run_mock = resp_mock.json()
+    assert run_mock["tts_cache_hit_rate"] is None
+    assert "evaluation_latency_ms" in run_mock["node_latencies_json"]
+    assert "planner" not in run_mock["node_latencies_json"]  # No fabricated node percentages
+
+    # 2. LIVE mode with missing credentials must fail with 400 Bad Request (no silent fallback to MOCK)
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+    resp_live = await client.post(
+        f"/api/v1/evaluations/episodes/{episode.id}/evaluate?mode=LIVE&provider=gemini&model_name=gemini-1.5-pro",
+        headers=auth_headers,
+    )
+    assert resp_live.status_code == 400
+    assert "GEMINI_API_KEY" in resp_live.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_rag_on_actually_retrieves_seeded_lore(db_session: AsyncSession, test_user: User):
+    """Verify that RAG ON actually retrieves the seeded lore into Planner/Writer, and RAG OFF receives zero context."""
+    runner = ExperimentRunner()
+    case = load_golden_dataset()[0]  # Has '1947 telegraph on desk' and 'Radio Mirage station frequency overlap'
+
+    res = await runner.run_experiment(
+        experiment_type="rag_ablation",
+        test_cases=[case],
+        user_id=test_user.id,
+        db=db_session,
+    )
+
+    runs = (
+        await db_session.scalars(
+            select(EvaluationRun).where(EvaluationRun.experiment_id == res.experiment_id)
+        )
+    ).all()
+    assert len(runs) == 2
+
+    rag_on_run = next(r for r in runs if r.retrieval_enabled)
+    rag_off_run = next(r for r in runs if not r.retrieval_enabled)
+
+    # 1. RAG ON: context contains actual seeded lore
+    planner_ctx = rag_on_run.node_latencies_json.get("rag_context_planner", "")
+    writer_ctx = rag_on_run.node_latencies_json.get("rag_context_writer", "")
+    assert planner_ctx != ""
+    assert writer_ctx != ""
+    assert any(elem.lower() in planner_ctx.lower() for elem in case.key_continuity_elements)
+
+    # 2. RAG OFF: strictly zero context
+    assert rag_off_run.node_latencies_json.get("rag_context_planner") == ""
+    assert rag_off_run.node_latencies_json.get("rag_context_writer") == ""
+
+    # 3. Unmeasured TTS is None
+    assert rag_on_run.tts_cache_hit_rate is None
+    assert rag_off_run.tts_cache_hit_rate is None
+
+
+def test_cost_semantics_always_estimated_never_actual():
+    """Verify that estimated cost calculation is always labeled ESTIMATED or MOCK, never ACTUAL."""
+    # Even when token counts are actual, token cost calculation is an estimate
+    cost, status = estimate_token_cost_with_status("gemini-1.5-pro", prompt_tokens=1000, completion_tokens=500)
+    assert status == "ESTIMATED"
+    assert status != "ACTUAL"
+
+    cost_mock, status_mock = estimate_token_cost_with_status("mock-model", prompt_tokens=1000, completion_tokens=500)
+    assert status_mock == "MOCK"
+    assert status_mock != "ACTUAL"
+
+
+

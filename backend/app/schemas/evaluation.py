@@ -245,7 +245,7 @@ class EvaluationSummaryMetrics(BaseModel):
     total_prompt_tokens: int
     total_completion_tokens: int
     avg_revision_count: float
-    avg_tts_cache_hit_rate: float
+    avg_tts_cache_hit_rate: float | None = None
     failure_taxonomy: dict[str, int]
 
 
