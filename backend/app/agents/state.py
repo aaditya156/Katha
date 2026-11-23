@@ -42,6 +42,10 @@ class KathaEpisodeState(TypedDict, total=False):
     bible_updates: BibleUpdatePayload | None
     story_bible_extraction: StoryBibleExtraction | None
 
+    # RAG Context Tracking
+    story_bible_context_planner: str | None
+    story_bible_context_writer: str | None
+
     # Graph Lifecycle & Reliability
     status: str  # PENDING, PLANNING, WRITING, CRITIQUING, REVISING, LOCALIZING, CASTING, UPDATING_BIBLE, COMPLETED, FAILED
     current_node: str

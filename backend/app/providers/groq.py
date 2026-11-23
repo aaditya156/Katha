@@ -100,13 +100,15 @@ class GroqProvider(BaseLLMProvider):
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
         total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
-        self.last_usage = ProviderUsageMetadata(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            model=self.model,
-            provider="groq",
-            usage_type="ACTUAL" if usage else "ESTIMATED",
+        self.record_usage(
+            ProviderUsageMetadata(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                model=self.model,
+                provider="groq",
+                usage_type="ACTUAL" if usage else "ESTIMATED",
+            )
         )
 
         try:
@@ -149,13 +151,15 @@ class GroqProvider(BaseLLMProvider):
         prompt_tokens = usage.get("prompt_tokens", 0)
         completion_tokens = usage.get("completion_tokens", 0)
         total_tokens = usage.get("total_tokens", prompt_tokens + completion_tokens)
-        self.last_usage = ProviderUsageMetadata(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            model=self.model,
-            provider="groq",
-            usage_type="ACTUAL" if usage else "ESTIMATED",
+        self.record_usage(
+            ProviderUsageMetadata(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                model=self.model,
+                provider="groq",
+                usage_type="ACTUAL" if usage else "ESTIMATED",
+            )
         )
         try:
             return res_json["choices"][0]["message"]["content"]

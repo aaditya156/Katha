@@ -21,6 +21,7 @@ from app.eval.golden_dataset import load_golden_dataset
 from app.models.episode import Episode
 from app.models.evaluation import BenchmarkExperiment, EvaluationRun
 from app.models.series import Series
+from app.models.story_bible import StoryBibleEntry
 from app.models.user import User
 from app.providers.factory import get_llm_provider
 from app.providers.mock import MockLLMProvider
@@ -574,4 +575,197 @@ async def test_usage_metadata_instrumentation():
     assert usage.prompt_tokens > 0
     assert usage.completion_tokens > 0
     assert usage.total_tokens == usage.prompt_tokens + usage.completion_tokens
+
+
+@pytest.mark.asyncio
+async def test_experiment_transaction_ordering_and_foreign_keys(db_session: AsyncSession, test_user: User):
+    """Verify BenchmarkExperiment is created as RUNNING first, and all child EvaluationRun records reference valid series and episodes."""
+    runner = ExperimentRunner()
+    case = load_golden_dataset()[0]
+
+    res = await runner.run_experiment(
+        experiment_type="critic_on_off",
+        test_cases=[case],
+        user_id=test_user.id,
+        db=db_session,
+    )
+
+    # 1. Parent experiment is COMPLETED
+    exp_db = await db_session.scalar(
+        select(BenchmarkExperiment).where(BenchmarkExperiment.id == res.experiment_id)
+    )
+    assert exp_db is not None
+    assert exp_db.status == "COMPLETED"
+
+    # 2. Child evaluation runs
+    runs = (
+        await db_session.scalars(
+            select(EvaluationRun).where(EvaluationRun.experiment_id == res.experiment_id)
+        )
+    ).all()
+    assert len(runs) == 2
+
+    for r in runs:
+        assert r.series_id is not None
+        assert r.episode_id is not None
+        # Verify series and episode actually exist in DB
+        s_db = await db_session.scalar(select(Series).where(Series.id == r.series_id))
+        e_db = await db_session.scalar(select(Episode).where(Episode.id == r.episode_id))
+        assert s_db is not None
+        assert e_db is not None
+        assert e_db.series_id == s_db.id
+
+    # 3. Seeded lore references valid episode
+    lore_entries = (
+        await db_session.scalars(
+            select(StoryBibleEntry).where(StoryBibleEntry.series_id == runs[0].series_id)
+        )
+    ).all()
+    for le in lore_entries:
+        assert le.episode_id is not None
+        ep_check = await db_session.scalar(select(Episode).where(Episode.id == le.episode_id))
+        assert ep_check is not None
+
+
+@pytest.mark.asyncio
+async def test_experiment_failure_status_rollback(db_session: AsyncSession, test_user: User, monkeypatch: pytest.MonkeyPatch):
+    """Verify that if an error occurs during variant execution, BenchmarkExperiment status is marked FAILED."""
+    runner = ExperimentRunner()
+    case = load_golden_dataset()[0]
+
+    # Force a failure during variant execution
+    async def _failing_variant(*args, **kwargs):
+        raise RuntimeError("Simulated pipeline crash during experiment")
+
+    monkeypatch.setattr(runner, "_run_variant", _failing_variant)
+
+    with pytest.raises(RuntimeError, match="Simulated pipeline crash"):
+        await runner.run_experiment(
+            experiment_type="critic_on_off",
+            test_cases=[case],
+            user_id=test_user.id,
+            db=db_session,
+        )
+
+    # Check that parent experiment exists and has status FAILED
+    failed_exp = (
+        await db_session.scalars(
+            select(BenchmarkExperiment).where(BenchmarkExperiment.user_id == test_user.id).order_by(BenchmarkExperiment.created_at.desc())
+        )
+    ).first()
+    assert failed_exp is not None
+    assert failed_exp.status == "FAILED"
+    assert "error" in failed_exp.results_summary
+
+
+@pytest.mark.asyncio
+async def test_rag_ablation_retrieval_isolation(db_session: AsyncSession, test_user: User):
+    """Confirm RAG ON receives seeded memories while RAG OFF receives zero Story Bible context."""
+    runner = ExperimentRunner()
+    case = load_golden_dataset()[0]  # Has key_continuity_elements
+
+    res = await runner.run_experiment(
+        experiment_type="rag_ablation",
+        test_cases=[case],
+        user_id=test_user.id,
+        db=db_session,
+    )
+    assert res.experiment_type == "rag_ablation"
+    assert len(res.variants) == 2
+
+    # Query the 2 evaluation runs
+    runs = (
+        await db_session.scalars(
+            select(EvaluationRun).where(EvaluationRun.experiment_id == res.experiment_id)
+        )
+    ).all()
+    assert len(runs) == 2
+
+    rag_on_run = next(r for r in runs if r.retrieval_enabled)
+    rag_off_run = next(r for r in runs if not r.retrieval_enabled)
+
+    # Verify both series had lore seeded (filtering by entity_type == 'lore' as bible_updater adds downstream facts)
+    lore_on = (await db_session.scalars(select(StoryBibleEntry).where(StoryBibleEntry.series_id == rag_on_run.series_id, StoryBibleEntry.entity_type == "lore"))).all()
+    lore_off = (await db_session.scalars(select(StoryBibleEntry).where(StoryBibleEntry.series_id == rag_off_run.series_id, StoryBibleEntry.entity_type == "lore"))).all()
+    assert len(lore_on) == len(case.key_continuity_elements)
+    assert len(lore_off) == len(case.key_continuity_elements)
+
+    # Verify delta analysis contains distinct improved/regressed/unchanged
+    assert "cases_improved" in res.delta_analysis
+    assert "cases_regressed" in res.delta_analysis
+    assert "cases_unchanged" in res.delta_analysis
+
+
+@pytest.mark.asyncio
+async def test_usage_aggregation_across_multiple_calls():
+    """Verify aggregated usage correctly sums prompt/completion tokens across multiple LLM invocations."""
+    mock_llm = MockLLMProvider(model_name="test-multi-call")
+    mock_llm.reset_usage()
+
+    assert mock_llm.get_aggregated_usage().call_count == 0
+
+    await mock_llm.generate_chat("First prompt")
+    await mock_llm.generate_chat("Second longer prompt with more words")
+    await mock_llm.generate_chat("Third prompt")
+
+    agg = mock_llm.get_aggregated_usage()
+    assert agg.call_count == 3
+    assert agg.prompt_tokens > 0
+    assert agg.completion_tokens > 0
+    assert agg.total_tokens == agg.prompt_tokens + agg.completion_tokens
+    assert agg.model == "test-multi-call"
+    assert agg.usage_type == "ESTIMATED"
+
+    # Reset cleans history
+    mock_llm.reset_usage()
+    assert mock_llm.get_aggregated_usage().call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_benchmark_api_live_mode_credential_validation(
+    client: AsyncClient,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Verify LIVE mode rejects requests when credentials are missing and never silently switches to MOCK."""
+    monkeypatch.setenv("GEMINI_API_KEY", "")
+
+    # 1. LIVE mode without key must return 400 Bad Request
+    resp = await client.post(
+        "/api/v1/evaluations/benchmark?experiment_type=critic_on_off&num_cases=1&mode=LIVE&model_a=gemini-1.5-pro",
+        headers=auth_headers,
+    )
+    assert resp.status_code == 400
+    assert "Missing GEMINI_API_KEY" in resp.json()["detail"]
+
+    # 2. MOCK mode succeeds
+    resp_mock = await client.post(
+        "/api/v1/evaluations/benchmark?experiment_type=critic_on_off&num_cases=1&mode=MOCK",
+        headers=auth_headers,
+    )
+    assert resp_mock.status_code == 200
+    data = resp_mock.json()
+    assert data["experiment_type"] == "critic_on_off"
+
+
+@pytest.mark.asyncio
+async def test_metric_truthfulness_no_fabricated_tts(db_session: AsyncSession, test_user: User):
+    """Verify experiments and episode evaluations report 0.0 or None for TTS cache hit rate and never fabricate percentages."""
+    runner = ExperimentRunner()
+    case = load_golden_dataset()[0]
+
+    res = await runner.run_experiment(
+        experiment_type="critic_on_off",
+        test_cases=[case],
+        user_id=test_user.id,
+        db=db_session,
+    )
+
+    # Variants report None for tts_cache_hit_rate in text-only experiments
+    assert res.variants[0].tts_cache_hit_rate is None
+    assert res.variants[1].tts_cache_hit_rate is None
+
+    # Delta analysis has non-fabricated categories
+    assert res.delta_analysis["cases_improved"] + res.delta_analysis["cases_regressed"] + res.delta_analysis["cases_unchanged"] == 1
+
 

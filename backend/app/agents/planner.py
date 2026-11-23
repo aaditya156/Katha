@@ -120,6 +120,7 @@ async def planner_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[s
         )
         return {
             "outline": outline,
+            "story_bible_context_planner": story_bible_context,
             "status": "PLANNING_COMPLETED",
             "current_node": "planner",
         }

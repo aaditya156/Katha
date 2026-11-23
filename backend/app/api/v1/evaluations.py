@@ -58,6 +58,10 @@ async def evaluate_episode(
         provider_id=provider,
     )
 
+    # Determine token usage classification from judge provider metadata
+    last_usage = evaluator_service.llm.get_last_usage()
+    token_usage_type = last_usage.usage_type if last_usage else ("ACTUAL" if provider != "mock" else "MOCK")
+
     run = EvaluationRun(
         user_id=current_user.id,
         series_id=episode.series_id,
@@ -69,24 +73,22 @@ async def evaluate_episode(
         latency_ms=eval_result.latency_ms,
         prompt_tokens=eval_result.prompt_tokens,
         completion_tokens=eval_result.completion_tokens,
-        token_usage_type="ACTUAL" if eval_result.cost_status == "ESTIMATED" and provider != "mock" else "ESTIMATED",
+        token_usage_type=token_usage_type,
         estimated_cost_usd=eval_result.estimated_cost_usd,
-        revision_count=1,
-        tts_cache_hit_rate=0.85,
+        revision_count=0,
+        tts_cache_hit_rate=0.0,
         generated_script_text=str(script_content),
         composite_score=eval_result.composite_score,
         character_consistency=eval_result.rubric.character_consistency.score,
-        plot_coherence=eval_result.rubric.plot_coherence.score,
-        language_naturalness=eval_result.rubric.language_naturalness.score,
-        pacing=eval_result.rubric.pacing.score,
+        plot_coherence=eval_result.rubric.narrative_coherence.score,
+        language_naturalness=eval_result.rubric.localization_quality.score,
+        pacing=eval_result.rubric.dialogue_quality.score,
         safety=eval_result.rubric.safety.score,
         passed=eval_result.passed,
         verdict=eval_result.verdict,
         scores_json=eval_result.rubric.model_dump(),
         node_latencies_json={
-            "planner": round(eval_result.latency_ms * 0.2, 1),
-            "writer": round(eval_result.latency_ms * 0.5, 1),
-            "critic": round(eval_result.latency_ms * 0.3, 1),
+            "evaluation_latency_ms": eval_result.latency_ms,
         },
         feedback=eval_result.rubric.overall_critique,
     )
@@ -204,8 +206,35 @@ async def run_benchmark_experiment(
     num_cases: int = Query(default=6, ge=1, le=35),
     model_a: str = Query(default="gemini-1.5-pro"),
     model_b: str = Query(default="gemini-1.5-flash"),
+    provider_a: str | None = Query(default=None),
+    provider_b: str | None = Query(default=None),
+    judge_model: str = Query(default="gemini-1.5-pro"),
+    judge_provider: str | None = Query(default=None),
+    mode: Literal["LIVE", "MOCK"] = Query(default="MOCK"),
 ) -> BenchmarkExperimentResponse:
     """Execute a controlled benchmark experiment across golden premises."""
+    from fastapi import HTTPException
+    from app.core.config import get_settings
+    settings = get_settings()
+
+    # Fail fast if LIVE mode is requested without required credentials
+    if mode == "LIVE":
+        prov_a = provider_a or ("gemini" if "gemini" in model_a.lower() else "groq" if "groq" in model_a.lower() else "mock")
+        prov_b = provider_b or ("gemini" if "gemini" in model_b.lower() else "groq" if "groq" in model_b.lower() else "mock")
+        prov_judge = judge_provider or ("gemini" if "gemini" in judge_model.lower() else "groq" if "groq" in judge_model.lower() else "mock")
+
+        for p_name, m_name in [(prov_a, model_a), (prov_b, model_b), (prov_judge, judge_model)]:
+            if p_name == "gemini" and not settings.GEMINI_API_KEY:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Missing GEMINI_API_KEY required for LIVE experiment execution of model '{m_name}'."
+                )
+            if p_name == "groq" and not settings.GROQ_API_KEY:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Missing GROQ_API_KEY required for LIVE experiment execution of model '{m_name}'."
+                )
+
     all_cases = load_golden_dataset()
     cases = all_cases[:num_cases]
     return await experiment_runner.run_experiment(
@@ -213,6 +242,11 @@ async def run_benchmark_experiment(
         test_cases=cases,
         model_a=model_a,
         model_b=model_b,
+        provider_a=provider_a,
+        provider_b=provider_b,
+        judge_model=judge_model,
+        judge_provider=judge_provider,
+        mode=mode,
         user_id=current_user.id,
         db=db,
     )

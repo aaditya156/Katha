@@ -12,11 +12,12 @@ from app.core.config import get_settings
 from app.core.database import async_session_factory
 from app.core.telemetry import estimate_token_cost, estimate_token_cost_with_status
 from app.eval.golden_dataset import GoldenTestCase, load_golden_dataset
+from app.models.episode import Episode
 from app.models.evaluation import BenchmarkExperiment, EvaluationRun
 from app.models.series import Series
 from app.models.story_bible import StoryBibleEntry
 from app.models.user import User
-from app.providers.base import BaseLLMProvider
+from app.providers.base import BaseLLMProvider, ProviderUsageMetadata
 from app.providers.factory import get_llm_provider
 from app.providers.mock import MockLLMProvider
 from app.schemas.evaluation import (
@@ -93,12 +94,14 @@ class ExperimentRunner:
         model_b: str = "gemini-1.5-flash",
         provider_a: str | None = None,
         provider_b: str | None = None,
+        judge_model: str = "gemini-1.5-pro",
+        judge_provider: str | None = None,
         mode: Literal["LIVE", "MOCK"] = "MOCK",
         user_id: str | None = None,
         db: AsyncSession | None = None,
     ) -> BenchmarkExperimentResponse:
         """Execute a controlled multi-variant benchmark experiment across golden test premises."""
-        cases = test_cases or load_golden_dataset()[:6]  # Default to 6 diverse cases if unspecified
+        cases = test_cases or load_golden_dataset()[:6]
         experiment_id = str(uuid.uuid4())
         start_time_iso = datetime.now(timezone.utc).isoformat()
 
@@ -108,8 +111,10 @@ class ExperimentRunner:
             db = await session_cm.__aenter__()
             should_close = True
 
+        exp_record: BenchmarkExperiment | None = None
+
         try:
-            # Ensure valid user exists for foreign key constraints
+            # 1. Resolve or create user for valid foreign key constraints
             resolved_user_id = user_id
             if not resolved_user_id:
                 user_rec = await db.scalar(select(User.id).limit(1))
@@ -126,22 +131,54 @@ class ExperimentRunner:
                 else:
                     resolved_user_id = user_rec
 
-            # Set up the shared judge evaluator: BOTH variants use the EXACT SAME judge to prevent bias
-            if mode == "LIVE":
-                judge_llm = get_llm_provider("gemini", "gemini-1.5-pro", mode="LIVE")
-                judge_evaluator = LLMJudgeEvaluator(llm_provider=judge_llm)
-            else:
-                judge_evaluator = LLMJudgeEvaluator(llm_provider=MockLLMProvider(mode="normal"))
-
-            # Resolve providers
-            res_provider_a = provider_a or ("gemini" if "gemini" in model_a.lower() else "groq" if "groq" in model_a.lower() else "mock")
-            res_provider_b = provider_b or ("gemini" if "gemini" in model_b.lower() else "groq" if "groq" in model_b.lower() else "mock")
-
+            # 2. Derive Experiment Title
             if experiment_type == "critic_on_off":
                 title = "Critic Loop Ablation: Feedback Loop vs Raw Draft Generation"
                 variant_a_name = "Critic ON (Quality Guardrail Loop)"
                 variant_b_name = "Critic OFF (Bypass Revision Loop)"
+            elif experiment_type == "rag_ablation":
+                title = "Story Bible RAG Ablation: pgvector Hybrid Retrieval vs Zero-Memory Baseline"
+                variant_a_name = "Story Bible ON (pgvector Lore Retrieval)"
+                variant_b_name = "Story Bible OFF (No Episodic Memory)"
+            else:
+                title = f"Model Arena Benchmark: {model_a} vs {model_b}"
+                variant_a_name = f"Model A ({model_a})"
+                variant_b_name = f"Model B ({model_b})"
 
+            # 3. Create and persist parent BenchmarkExperiment with status RUNNING
+            # (Ensures all child EvaluationRun records satisfy foreign key constraints)
+            exp_record = BenchmarkExperiment(
+                id=experiment_id,
+                user_id=resolved_user_id,
+                title=title,
+                experiment_type=experiment_type,
+                status="RUNNING",
+                results_summary={
+                    "dataset_version": "2.0.0",
+                    "rubric_version": "2.0.0",
+                    "prompt_version": "2.0.0",
+                    "execution_mode": mode,
+                    "models": [model_a, model_b],
+                    "start_time": start_time_iso,
+                },
+            )
+            db.add(exp_record)
+            await db.commit()
+
+            # 4. Set up shared judge evaluator: BOTH variants use the EXACT SAME judge to prevent bias
+            resolved_judge_provider = judge_provider or ("gemini" if "gemini" in judge_model.lower() else "mock")
+            if mode == "LIVE":
+                judge_llm = get_llm_provider(resolved_judge_provider, judge_model, mode="LIVE")
+                judge_evaluator = LLMJudgeEvaluator(llm_provider=judge_llm)
+            else:
+                judge_evaluator = LLMJudgeEvaluator(llm_provider=MockLLMProvider(model_name=judge_model, mode="normal"))
+
+            # 5. Resolve generation providers
+            res_provider_a = provider_a or ("gemini" if "gemini" in model_a.lower() else "groq" if "groq" in model_a.lower() else "mock")
+            res_provider_b = provider_b or ("gemini" if "gemini" in model_b.lower() else "groq" if "groq" in model_b.lower() else "mock")
+
+            # 6. Execute Variants based on experiment type
+            if experiment_type == "critic_on_off":
                 metrics_a, runs_a = await self._run_variant(
                     variant_name=variant_a_name,
                     experiment_id=experiment_id,
@@ -169,8 +206,27 @@ class ExperimentRunner:
                     db=db,
                 )
 
-                improved_count = sum(1 for ra, rb in zip(runs_a, runs_b) if ra.composite_score > rb.composite_score)
-                neutral_or_regressed = len(cases) - improved_count
+                improved_count = sum(1 for ra, rb in zip(runs_a, runs_b) if ra.composite_score > rb.composite_score + 0.05)
+                regressed_count = sum(1 for ra, rb in zip(runs_a, runs_b) if ra.composite_score < rb.composite_score - 0.05)
+                unchanged_count = len(cases) - (improved_count + regressed_count)
+
+                if improved_count > regressed_count:
+                    conclusion = (
+                        f"Critic revision loop demonstrated empirical quality gains in {improved_count}/{len(cases)} cases "
+                        f"({regressed_count} regressions, {unchanged_count} unchanged)."
+                    )
+                elif regressed_count > improved_count:
+                    conclusion = (
+                        f"Critic revision loop showed regressions in {regressed_count}/{len(cases)} cases versus "
+                        f"{improved_count} improvements ({unchanged_count} unchanged)."
+                    )
+                elif len(cases) == 0:
+                    conclusion = "Inconclusive: No benchmark cases were evaluated."
+                else:
+                    conclusion = (
+                        f"Inconclusive: Balanced outcomes ({improved_count} improved, {regressed_count} regressed, "
+                        f"{unchanged_count} unchanged) across {len(cases)} cases; insufficient evidence of significant difference."
+                    )
 
                 delta_analysis = {
                     "quality_uplift_pct": round(
@@ -190,24 +246,17 @@ class ExperimentRunner:
                         metrics_a.avg_dialogue_quality - metrics_b.avg_dialogue_quality, 2
                     ),
                     "cases_improved": improved_count,
-                    "cases_neutral_or_regressed": neutral_or_regressed,
+                    "cases_regressed": regressed_count,
+                    "cases_unchanged": unchanged_count,
                     "latency_overhead_pct": round(
                         ((metrics_a.avg_latency_ms - metrics_b.avg_latency_ms) / max(1.0, metrics_b.avg_latency_ms)) * 100.0,
                         2,
                     ),
                     "cost_delta_usd": round(metrics_a.avg_cost_usd - metrics_b.avg_cost_usd, 6),
-                    "conclusion": (
-                        f"Critic revision loop yields meaningful narrative coherence and consistency gains "
-                        f"in {improved_count}/{len(cases)} cases, with bounded latency overhead. "
-                        f"In {neutral_or_regressed}/{len(cases)} cases, initial writer draft was already adequate."
-                    ),
+                    "conclusion": conclusion,
                 }
 
             elif experiment_type == "rag_ablation":
-                title = "Story Bible RAG Ablation: pgvector Hybrid Retrieval vs Zero-Memory Baseline"
-                variant_a_name = "Story Bible ON (pgvector Lore Retrieval)"
-                variant_b_name = "Story Bible OFF (No Episodic Memory)"
-
                 metrics_a, runs_a = await self._run_variant(
                     variant_name=variant_a_name,
                     experiment_id=experiment_id,
@@ -235,6 +284,26 @@ class ExperimentRunner:
                     db=db,
                 )
 
+                improved_count = sum(1 for ra, rb in zip(runs_a, runs_b) if ra.composite_score > rb.composite_score + 0.05)
+                regressed_count = sum(1 for ra, rb in zip(runs_a, runs_b) if ra.composite_score < rb.composite_score - 0.05)
+                unchanged_count = len(cases) - (improved_count + regressed_count)
+
+                if improved_count > regressed_count:
+                    conclusion = (
+                        f"Story Bible retrieval improved continuity and consistency in {improved_count}/{len(cases)} cases "
+                        f"({regressed_count} regressed, {unchanged_count} unchanged)."
+                    )
+                elif regressed_count > improved_count:
+                    conclusion = (
+                        f"Story Bible retrieval showed lower scores in {regressed_count}/{len(cases)} cases versus "
+                        f"{improved_count} improvements ({unchanged_count} unchanged)."
+                    )
+                else:
+                    conclusion = (
+                        f"Inconclusive: Story Bible retrieval yielded neutral impact across {len(cases)} benchmark samples "
+                        f"({improved_count} improved, {regressed_count} regressed, {unchanged_count} unchanged)."
+                    )
+
                 token_overhead_pct = round(
                     ((metrics_a.avg_tokens - metrics_b.avg_tokens) / max(1, metrics_b.avg_tokens)) * 100.0,
                     2,
@@ -258,19 +327,18 @@ class ExperimentRunner:
                         ((metrics_a.avg_composite_score - metrics_b.avg_composite_score) / max(0.1, metrics_b.avg_composite_score)) * 100.0,
                         2,
                     ),
+                    "cases_improved": improved_count,
+                    "cases_regressed": regressed_count,
+                    "cases_unchanged": unchanged_count,
                     "token_overhead_pct": token_overhead_pct,
                     "cost_delta_usd": round(metrics_a.avg_cost_usd - metrics_b.avg_cost_usd, 6),
                     "retrieval_latency_overhead_ms": round(
                         metrics_a.avg_latency_ms - metrics_b.avg_latency_ms, 2
                     ),
-                    "conclusion": "Persistent pgvector Story Bible retrieval eliminates episodic continuity drift and persona collapse with modest token overhead.",
+                    "conclusion": conclusion,
                 }
 
             else:  # model_comparison
-                title = f"Model Arena Benchmark: {model_a} vs {model_b}"
-                variant_a_name = f"Model A ({model_a})"
-                variant_b_name = f"Model B ({model_b})"
-
                 metrics_a, runs_a = await self._run_variant(
                     variant_name=variant_a_name,
                     experiment_id=experiment_id,
@@ -298,6 +366,13 @@ class ExperimentRunner:
                     db=db,
                 )
 
+                if metrics_a.avg_composite_score > metrics_b.avg_composite_score + 0.1:
+                    recommendation = f"{model_a} demonstrated higher average composite quality ({metrics_a.avg_composite_score} vs {metrics_b.avg_composite_score})."
+                elif metrics_b.avg_composite_score > metrics_a.avg_composite_score + 0.1:
+                    recommendation = f"{model_b} demonstrated higher average composite quality ({metrics_b.avg_composite_score} vs {metrics_a.avg_composite_score})."
+                else:
+                    recommendation = f"Both models achieved comparable overall scores ({metrics_a.avg_composite_score} vs {metrics_b.avg_composite_score}); evaluate latency and cost trade-offs."
+
                 delta_analysis = {
                     "score_difference": round(metrics_a.avg_composite_score - metrics_b.avg_composite_score, 2),
                     "speedup_factor": round(metrics_a.avg_latency_ms / max(1.0, metrics_b.avg_latency_ms), 2),
@@ -309,33 +384,26 @@ class ExperimentRunner:
                         2,
                     ) if metrics_a.avg_cost_usd > 0 else 0.0,
                     "failure_rate_delta": round(metrics_a.failure_rate - metrics_b.failure_rate, 2),
-                    "validation_failures_total": metrics_a.validation_failures + metrics_b.validation_failures,
-                    "recommendation": f"{model_b} provides fast generation; {model_a} offers nuanced narrative depth.",
+                    "validation_failures_total": (metrics_a.validation_failures or 0) + (metrics_b.validation_failures or 0),
+                    "recommendation": recommendation,
                 }
 
             completed_time_iso = datetime.now(timezone.utc).isoformat()
 
-            # Persist summary record to database with full reproducibility tracking
-            exp_record = BenchmarkExperiment(
-                id=experiment_id,
-                user_id=resolved_user_id,
-                title=title,
-                experiment_type=experiment_type,
-                status="COMPLETED",
-                results_summary={
-                    "dataset_version": "2.0.0",
-                    "rubric_version": "2.0.0",
-                    "prompt_version": "2.0.0",
-                    "execution_mode": mode,
-                    "models": [model_a, model_b],
-                    "start_time": start_time_iso,
-                    "completed_time": completed_time_iso,
-                    "variants": [metrics_a.model_dump(), metrics_b.model_dump()],
-                    "delta_analysis": delta_analysis,
-                    "total_samples": len(cases),
-                },
-            )
-            db.add(exp_record)
+            # 7. Update parent experiment to COMPLETED
+            exp_record.status = "COMPLETED"
+            exp_record.results_summary = {
+                "dataset_version": "2.0.0",
+                "rubric_version": "2.0.0",
+                "prompt_version": "2.0.0",
+                "execution_mode": mode,
+                "models": [model_a, model_b],
+                "start_time": start_time_iso,
+                "completed_time": completed_time_iso,
+                "variants": [metrics_a.model_dump(), metrics_b.model_dump()],
+                "delta_analysis": delta_analysis,
+                "total_samples": len(cases),
+            }
             await db.commit()
 
             return BenchmarkExperimentResponse(
@@ -351,8 +419,20 @@ class ExperimentRunner:
             )
 
         except Exception as exc:
-            await db.rollback()
             logger.error(f"Experiment execution failed: {exc}", exc_info=True)
+            if exp_record is not None:
+                try:
+                    exp_record.status = "FAILED"
+                    exp_record.results_summary = {
+                        "error": str(exc),
+                        "failed_at": datetime.now(timezone.utc).isoformat(),
+                    }
+                    await db.commit()
+                except Exception as commit_err:
+                    logger.error(f"Failed to update experiment status to FAILED: {commit_err}")
+                    await db.rollback()
+            else:
+                await db.rollback()
             raise
         finally:
             if should_close:
@@ -385,7 +465,7 @@ class ExperimentRunner:
         tokens_list: list[int] = []
         costs: list[float] = []
         pass_count = 0
-        validation_failures = 0
+        validation_failures_total = 0
         revision_count_total = 0
         cost_status_overall = "ACTUAL" if mode == "LIVE" else "ESTIMATED"
         runs: list[EvaluationRun] = []
@@ -395,7 +475,7 @@ class ExperimentRunner:
         graph = create_katha_graph(llm=gen_llm)
 
         for case in cases:
-            # 1. Setup isolated series and seed lore if available
+            # 1. Setup isolated series AND actual episode records in PostgreSQL
             series_id = f"exp-{uuid.uuid4().hex[:12]}"
             episode_id = f"ep-{uuid.uuid4().hex[:12]}"
 
@@ -410,6 +490,20 @@ class ExperimentRunner:
             )
             db.add(series_rec)
 
+            episode_rec = Episode(
+                id=episode_id,
+                series_id=series_id,
+                episode_number=1,
+                title=case.title,
+                premise=case.premise,
+                target_language=case.target_language,
+                duration_minutes_target=case.target_duration_minutes,
+                status="DRAFT",
+            )
+            db.add(episode_rec)
+            await db.flush()
+
+            # 2. Seed lore referencing valid series_id AND episode_id
             if case.key_continuity_elements:
                 for idx, elem in enumerate(case.key_continuity_elements, start=1):
                     emb = await story_bible_service.embedding_provider.embed_text(elem)
@@ -423,9 +517,11 @@ class ExperimentRunner:
                         metadata_json={"importance": "high"},
                     )
                     db.add(entry)
-            await db.flush()
 
-            # 2. Run actual LangGraph pipeline generation
+            # Commit the seeded lore before executing LangGraph
+            await db.commit()
+
+            # 3. Run actual LangGraph pipeline generation
             initial_state = {
                 "series_id": series_id,
                 "episode_id": episode_id,
@@ -441,30 +537,36 @@ class ExperimentRunner:
                 },
             }
 
+            gen_llm.reset_usage()
             gen_start_ts = time.perf_counter()
             final_state = await graph.ainvoke(initial_state)
             gen_latency_ms = (time.perf_counter() - gen_start_ts) * 1000.0
 
-            # 3. Format actual generated script and extract actual revisions
+            # 4. Verify RAG Isolation & Retrieval Context
+            planner_rag_ctx = final_state.get("story_bible_context_planner") or ""
+            writer_rag_ctx = final_state.get("story_bible_context_writer") or ""
+            if not retrieval_enabled:
+                if planner_rag_ctx:
+                    raise AssertionError(f"RAG OFF violation: Planner received unexpected lore context: {planner_rag_ctx[:100]}")
+                if writer_rag_ctx:
+                    raise AssertionError(f"RAG OFF violation: Writer received unexpected lore context: {writer_rag_ctx[:100]}")
+
+            # 5. Format actual generated script and extract actual revisions & validation errors
             generated_script_text = format_script_for_eval(final_state)
             revisions = final_state.get("revision_count", 0)
+            errors_in_state = final_state.get("errors", [])
+            validation_failures_total += len(errors_in_state)
 
-            # 4. Measure tokens and token usage type
-            usage_meta = gen_llm.get_last_usage()
-            if usage_meta:
-                prompt_tokens = usage_meta.prompt_tokens
-                completion_tokens = usage_meta.completion_tokens
-                token_usage_type = usage_meta.usage_type
-            else:
-                prompt_tokens = max(10, len(case.premise.split()) * 4)
-                completion_tokens = max(20, len(generated_script_text.split()) * 2)
-                token_usage_type = "ESTIMATED"
+            # 6. Aggregate generation usage across all graph node calls
+            gen_usage = gen_llm.get_aggregated_usage()
+            gen_prompt_tokens = gen_usage.prompt_tokens
+            gen_completion_tokens = gen_usage.completion_tokens
+            gen_usage_type = gen_usage.usage_type
+            gen_cost_usd, gen_cost_status = estimate_token_cost_with_status(model_name, gen_prompt_tokens, gen_completion_tokens)
 
-            cost_usd, c_status = estimate_token_cost_with_status(model_name, prompt_tokens, completion_tokens)
-            if c_status != "ESTIMATED" and cost_status_overall != "UNKNOWN":
-                cost_status_overall = c_status
-
-            # 5. Evaluate the generated script using the shared judge
+            # 7. Evaluate the generated script using the shared judge
+            if hasattr(judge.llm, "reset_usage"):
+                judge.llm.reset_usage()
             eval_start_ts = time.perf_counter()
             eval_res: EvaluationResult = await judge.evaluate_script(
                 script=generated_script_text,
@@ -476,7 +578,27 @@ class ExperimentRunner:
             eval_latency_ms = (time.perf_counter() - eval_start_ts) * 1000.0
             total_latency_ms = gen_latency_ms + eval_latency_ms
 
-            # 6. Extract raw, unmodified scores from judge
+            # 8. Aggregate judge usage
+            judge_usage = judge.llm.get_aggregated_usage() if hasattr(judge.llm, "get_aggregated_usage") else ProviderUsageMetadata()
+            judge_cost_usd, judge_cost_status = estimate_token_cost_with_status(
+                getattr(judge, "model_name", "gemini-1.5-pro"),
+                judge_usage.prompt_tokens,
+                judge_usage.completion_tokens,
+            )
+
+            # Overall usage classification
+            if gen_usage_type == "ACTUAL" and judge_usage.usage_type == "ACTUAL":
+                overall_token_usage_type = "ACTUAL"
+            elif gen_usage_type == "MOCK" or judge_usage.usage_type == "MOCK":
+                overall_token_usage_type = "MOCK"
+            else:
+                overall_token_usage_type = "ESTIMATED"
+
+            total_prompt_tokens = gen_prompt_tokens + judge_usage.prompt_tokens
+            total_completion_tokens = gen_completion_tokens + judge_usage.completion_tokens
+            total_cost_usd = round(gen_cost_usd + judge_cost_usd, 6)
+
+            # 9. Extract raw, unmodified scores from judge
             char_score = eval_res.rubric.character_consistency.score
             plot_score = eval_res.rubric.plot_continuity.score
             inst_score = eval_res.rubric.instruction_adherence.score
@@ -495,17 +617,21 @@ class ExperimentRunner:
             inst_scores.append(inst_score)
             safe_scores.append(safe_score)
             latencies.append(total_latency_ms)
-            tokens_list.append(prompt_tokens + completion_tokens)
-            costs.append(cost_usd)
+            tokens_list.append(total_prompt_tokens + total_completion_tokens)
+            costs.append(total_cost_usd)
             revision_count_total += revisions
-            if composite_score >= 3.5:
+
+            # Pass rate determined by eval_res.passed (which includes safety threshold)
+            if eval_res.passed:
                 pass_count += 1
 
-            # 7. Persist individual run with reproducibility metadata
+            # 10. Persist individual run with valid foreign keys and reproducibility metadata
             run_record = EvaluationRun(
                 experiment_id=experiment_id,
                 variant_name=variant_name,
-                token_usage_type=token_usage_type,
+                series_id=series_id,
+                episode_id=episode_id,
+                token_usage_type=overall_token_usage_type,
                 generated_script_text=generated_script_text,
                 user_id=user_id,
                 test_case_id=case.id,
@@ -514,23 +640,49 @@ class ExperimentRunner:
                 critic_enabled=critic_enabled,
                 retrieval_enabled=retrieval_enabled,
                 latency_ms=round(total_latency_ms, 2),
-                prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                estimated_cost_usd=cost_usd,
+                prompt_tokens=total_prompt_tokens,
+                completion_tokens=total_completion_tokens,
+                estimated_cost_usd=total_cost_usd,
                 revision_count=revisions,
-                tts_cache_hit_rate=0.85 if retrieval_enabled else 0.40,
+                tts_cache_hit_rate=0.0,  # Explicitly 0.0 / unmeasured rather than fabricated
                 composite_score=composite_score,
                 character_consistency=char_score,
                 plot_coherence=narr_score,
                 language_naturalness=loc_score,
                 pacing=dial_score,
                 safety=safe_score,
-                passed=(composite_score >= 3.5),
-                verdict="PASS" if composite_score >= 3.5 else "FAIL",
+                passed=eval_res.passed,
+                verdict=eval_res.verdict,
                 scores_json=eval_res.rubric.model_dump(),
                 node_latencies_json={
                     "generation_latency_ms": round(gen_latency_ms, 1),
                     "evaluation_latency_ms": round(eval_latency_ms, 1),
+                    "usage_breakdown": {
+                        "generation": {
+                            "model": gen_usage.model or model_name,
+                            "provider": gen_usage.provider or provider,
+                            "prompt_tokens": gen_prompt_tokens,
+                            "completion_tokens": gen_completion_tokens,
+                            "total_tokens": gen_prompt_tokens + gen_completion_tokens,
+                            "latency_ms": round(gen_latency_ms, 1),
+                            "usage_type": gen_usage_type,
+                            "estimated_cost_usd": gen_cost_usd,
+                            "cost_status": gen_cost_status,
+                            "call_count": gen_usage.call_count,
+                        },
+                        "judge": {
+                            "model": judge_usage.model or getattr(judge, "model_name", "gemini-1.5-pro"),
+                            "provider": judge_usage.provider or getattr(judge, "provider_id", "gemini"),
+                            "prompt_tokens": judge_usage.prompt_tokens,
+                            "completion_tokens": judge_usage.completion_tokens,
+                            "total_tokens": judge_usage.prompt_tokens + judge_usage.completion_tokens,
+                            "latency_ms": round(eval_latency_ms, 1),
+                            "usage_type": judge_usage.usage_type,
+                            "estimated_cost_usd": judge_cost_usd,
+                            "cost_status": judge_cost_status,
+                            "call_count": judge_usage.call_count,
+                        },
+                    },
                 },
                 feedback=eval_res.rubric.overall_critique,
             )
@@ -551,7 +703,6 @@ class ExperimentRunner:
             variant_name=variant_name,
             sample_count=len(cases),
             avg_composite_score=round(sum(scores) / n, 2),
-            # 7 core dimensions
             avg_narrative_coherence=round(sum(narr_scores) / n, 2),
             avg_character_consistency=round(sum(char_scores) / n, 2),
             avg_dialogue_quality=round(sum(dial_scores) / n, 2),
@@ -559,11 +710,9 @@ class ExperimentRunner:
             avg_localization_quality=round(sum(loc_scores) / n, 2),
             avg_instruction_adherence=round(sum(inst_scores) / n, 2),
             avg_safety=round(sum(safe_scores) / n, 2),
-            # Backward-compatible fields
             avg_plot_coherence=round(sum(narr_scores) / n, 2),
             avg_language_naturalness=round(sum(loc_scores) / n, 2),
             avg_pacing=round(sum(dial_scores) / n, 2),
-            # Observability & cost
             avg_latency_ms=round(sum(latencies) / n, 2),
             p50_latency_ms=round(p50_lat, 2),
             p95_latency_ms=round(p95_lat, 2),
@@ -573,8 +722,8 @@ class ExperimentRunner:
             pass_rate=round(pass_count / n, 2),
             failure_rate=round((n - pass_count) / n, 2),
             revision_rate=round(revision_count_total / n, 2),
-            validation_failures=validation_failures,
-            tts_cache_hit_rate=0.85 if retrieval_enabled else 0.40,
+            validation_failures=validation_failures_total,
+            tts_cache_hit_rate=None,  # Not measured in text-generation experiments
         )
         return metrics, runs
 

@@ -91,14 +91,16 @@ class MockLLMProvider(BaseLLMProvider):
 
         prompt_tokens = int(len(prompt.split()) * 1.35)
         completion_tokens = 350
-        self.last_usage = ProviderUsageMetadata(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-            latency_ms=15.0,
-            model=self.model_name,
-            provider="mock",
-            usage_type="ESTIMATED",
+        self.record_usage(
+            ProviderUsageMetadata(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                latency_ms=15.0,
+                model=self.model_name,
+                provider="mock",
+                usage_type="ESTIMATED",
+            )
         )
 
         # 1. EpisodeOutline
@@ -696,12 +698,14 @@ class MockLLMProvider(BaseLLMProvider):
         res = f"Mock response for prompt: {prompt[:50]}..."
         prompt_tokens = int(len(prompt.split()) * 1.35)
         completion_tokens = int(len(res.split()) * 1.35)
-        self.last_usage = ProviderUsageMetadata(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-            model=self.model_name,
-            provider="mock",
-            usage_type="ESTIMATED",
+        self.record_usage(
+            ProviderUsageMetadata(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                model=self.model_name,
+                provider="mock",
+                usage_type="ESTIMATED",
+            )
         )
         return res

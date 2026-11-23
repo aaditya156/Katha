@@ -129,9 +129,9 @@ class CalibrationReport(BaseModel):
     rubric_version: str = "2.0.0"
     is_empirical: bool = Field(default=False, description="True if calibrated against real human ground truth; False for synthetic fixtures")
     calibration_status: Literal["EXCELLENT", "ACCEPTABLE", "NEEDS_TUNING", "PENDING_HUMAN_ANNOTATION", "SYNTHETIC_TEST_ONLY"]
-    spearman_correlation: dict[str, float]  # rho per dimension & composite
+    spearman_correlation: dict[str, float | None]  # rho per dimension & composite (None if insufficient samples)
     weighted_cohens_kappa: dict[str, float | None]  # quadratic weighted kappa per dimension (None if assumptions violated)
-    mean_absolute_error: dict[str, float]  # MAE per dimension
+    mean_absolute_error: dict[str, float | None]  # MAE per dimension (None if insufficient samples)
     identified_weaknesses: list[str]
     recommendations: list[str]
 
@@ -164,8 +164,22 @@ class ExperimentVariantMetrics(BaseModel):
     pass_rate: float
     failure_rate: float = 0.0
     revision_rate: float = 0.0
-    validation_failures: int = 0
-    tts_cache_hit_rate: float = 0.85
+    validation_failures: int | None = None
+    tts_cache_hit_rate: float | None = None
+
+
+class BenchmarkExperimentRequest(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    experiment_type: Literal["critic_on_off", "rag_ablation", "model_comparison"]
+    num_cases: int = Field(default=6, ge=1, le=35)
+    model_a: str = Field(default="gemini-1.5-pro")
+    model_b: str = Field(default="gemini-1.5-flash")
+    provider_a: str | None = None
+    provider_b: str | None = None
+    judge_model: str = Field(default="gemini-1.5-pro")
+    judge_provider: str | None = None
+    mode: Literal["LIVE", "MOCK"] = Field(default="MOCK")
 
 
 class BenchmarkExperimentResponse(BaseModel):
@@ -201,8 +215,8 @@ class EvaluationRunResponse(BaseModel):
     completion_tokens: int
     token_usage_type: str = "ESTIMATED"
     estimated_cost_usd: float
-    revision_count: int
-    tts_cache_hit_rate: float
+    revision_count: int = 0
+    tts_cache_hit_rate: float | None = None
     generated_script_text: str | None = None
     composite_score: float
     character_consistency: float

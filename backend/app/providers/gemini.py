@@ -100,13 +100,15 @@ class GeminiProvider(BaseLLMProvider):
         prompt_tokens = usage_meta.get("promptTokenCount", 0)
         completion_tokens = usage_meta.get("candidatesTokenCount", 0)
         total_tokens = usage_meta.get("totalTokenCount", prompt_tokens + completion_tokens)
-        self.last_usage = ProviderUsageMetadata(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            model=self.model,
-            provider="gemini",
-            usage_type="ACTUAL" if usage_meta else "ESTIMATED",
+        self.record_usage(
+            ProviderUsageMetadata(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                model=self.model,
+                provider="gemini",
+                usage_type="ACTUAL" if usage_meta else "ESTIMATED",
+            )
         )
 
         try:
@@ -148,13 +150,15 @@ class GeminiProvider(BaseLLMProvider):
         prompt_tokens = usage_meta.get("promptTokenCount", 0)
         completion_tokens = usage_meta.get("candidatesTokenCount", 0)
         total_tokens = usage_meta.get("totalTokenCount", prompt_tokens + completion_tokens)
-        self.last_usage = ProviderUsageMetadata(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=total_tokens,
-            model=self.model,
-            provider="gemini",
-            usage_type="ACTUAL" if usage_meta else "ESTIMATED",
+        self.record_usage(
+            ProviderUsageMetadata(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=total_tokens,
+                model=self.model,
+                provider="gemini",
+                usage_type="ACTUAL" if usage_meta else "ESTIMATED",
+            )
         )
         try:
             return res_json["candidates"][0]["content"]["parts"][0]["text"]

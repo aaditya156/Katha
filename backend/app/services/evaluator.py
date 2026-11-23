@@ -212,9 +212,9 @@ class LLMJudgeEvaluator:
                 rubric_version=RUBRIC_VERSION,
                 is_empirical=False,
                 calibration_status="PENDING_HUMAN_ANNOTATION",
-                spearman_correlation={dim: 0.0 for dim in dimensions},
+                spearman_correlation={dim: None for dim in dimensions},
                 weighted_cohens_kappa={dim: None for dim in dimensions},
-                mean_absolute_error={dim: 0.0 for dim in dimensions},
+                mean_absolute_error={dim: None for dim in dimensions},
                 identified_weaknesses=[
                     "Empirical human expert calibration pending: no verified human ground-truth labels available."
                 ],
@@ -274,9 +274,9 @@ class LLMJudgeEvaluator:
                     judge_ratings[dim].append(scores_map[dim])
 
         # Compute metrics only across dimensions with valid paired samples (>= 2 samples)
-        spearman_correlations: dict[str, float] = {}
+        spearman_correlations: dict[str, float | None] = {}
         weighted_kappas: dict[str, float | None] = {}
-        maes: dict[str, float] = {}
+        maes: dict[str, float | None] = {}
 
         for dim in dimensions:
             if len(human_ratings[dim]) >= 2:
@@ -284,21 +284,26 @@ class LLMJudgeEvaluator:
                 weighted_kappas[dim] = compute_weighted_cohens_kappa(human_ratings[dim], judge_ratings[dim])
                 maes[dim] = compute_mae(human_ratings[dim], judge_ratings[dim])
             else:
-                spearman_correlations[dim] = 0.0
+                spearman_correlations[dim] = None
                 weighted_kappas[dim] = None
-                maes[dim] = 0.0
+                maes[dim] = None
 
         # Systematic weakness analysis
         weaknesses: list[str] = []
-        if spearman_correlations["localization_quality"] < 0.70 or maes["localization_quality"] > 0.40:
+        loc_rho = spearman_correlations.get("localization_quality")
+        loc_mae = maes.get("localization_quality")
+        if (loc_rho is not None and loc_rho < 0.70) or (loc_mae is not None and loc_mae > 0.40):
             weaknesses.append(
                 "Dialect Nuance Blindspot: Judge exhibits leniency on Hinglish urban code-switching, occasionally rewarding awkward transliterations as natural speech."
             )
-        if spearman_correlations["dialogue_quality"] < 0.70 or maes["dialogue_quality"] > 0.40:
+        dial_rho = spearman_correlations.get("dialogue_quality")
+        dial_mae = maes.get("dialogue_quality")
+        if (dial_rho is not None and dial_rho < 0.70) or (dial_mae is not None and dial_mae > 0.40):
             weaknesses.append(
                 "Acoustic Direction Under-weighting: Judge occasionally rates scripts with overlong monologues as acceptable pacing if dialogue literary quality is high."
             )
-        if maes["character_consistency"] > 0.35:
+        char_mae = maes.get("character_consistency")
+        if char_mae is not None and char_mae > 0.35:
             weaknesses.append(
                 "Character Drift Compression: Judge scores cluster between 3.5 and 4.8, slightly under-penalizing subtle vocal persona shifts in secondary cast members."
             )
@@ -311,9 +316,11 @@ class LLMJudgeEvaluator:
             "Use temperature=0.0 and JSON schema enforcement during judge inference to minimize rating variance.",
         ]
 
-        composite_rho = spearman_correlations["composite"]
+        composite_rho = spearman_correlations.get("composite")
         if is_synthetic:
             status = "SYNTHETIC_TEST_ONLY"
+        elif composite_rho is None:
+            status = "PENDING_HUMAN_ANNOTATION"
         elif composite_rho >= 0.75:
             status = "EXCELLENT"
         elif composite_rho >= 0.55:

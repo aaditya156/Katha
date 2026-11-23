@@ -155,6 +155,7 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
         return {
             "raw_script": revised_script,
             "revision_count": revision_count + 1,
+            "story_bible_context_writer": story_bible_context,
             "failing_scenes": [],  # Cleared until next critique evaluation
             "status": "REVISED",
             "current_node": "writer",
@@ -206,6 +207,7 @@ async def writer_node(state: KathaEpisodeState, llm: BaseLLMProvider) -> dict[st
         )
         return {
             "raw_script": script,
+            "story_bible_context_writer": story_bible_context,
             "status": "WRITING_COMPLETED",
             "current_node": "writer",
         }
