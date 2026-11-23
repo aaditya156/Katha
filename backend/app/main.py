@@ -1,6 +1,7 @@
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
+from app.services.job_service import redispatch_pending_jobs
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -27,6 +28,14 @@ async def lifespan(app: FastAPI):
     import app.models  # noqa: F401 - ensure all models are registered
 
     await event_hub.initialize()
+
+    # Redispatch any QUEUED jobs that lost their Celery task due to API crash
+    try:
+        redispatched = await redispatch_pending_jobs()
+        if redispatched:
+            logger.info(f"Redispatched {redispatched} pending background jobs on startup.")
+    except Exception as exc:
+        logger.warning(f"Startup job redispatch skipped: {exc}")
 
     if settings.DATABASE_URL.startswith("sqlite"):
         async with engine.begin() as conn:

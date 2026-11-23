@@ -31,6 +31,25 @@ services:
       timeout: 3s
       retries: 5
 
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: katha_rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-katha}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASS:-katha_secret}
+      RABBITMQ_DEFAULT_VHOST: /
+    ports:
+      - "5672:5672"
+      - "15672:15672"  # Management UI
+    volumes:
+      - rabbitmqdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
@@ -42,11 +61,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
     ports:
       - "8000:8000"
     environment:
       DATABASE_URL: postgresql+asyncpg://katha:katha_secret@db:5432/katha_studio
       REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-katha}:${RABBITMQ_PASS:-katha_secret}@rabbitmq:5672//
       SECRET_KEY: ${SECRET_KEY:-dev_secret_key_change_in_production_1234567890}
       ENVIRONMENT: development
       LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-mock}
@@ -58,6 +80,56 @@ services:
       STORY_BIBLE_RETRIEVAL_ENABLED: ${STORY_BIBLE_RETRIEVAL_ENABLED:-true}
     volumes:
       - ./audio_cache:/app/audio_cache
+
+  generation-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: katha_generation_worker
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app.celery_app worker --queues=generation --concurrency=2 --loglevel=info --hostname=generation@%h
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://katha:katha_secret@db:5432/katha_studio
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-katha}:${RABBITMQ_PASS:-katha_secret}@rabbitmq:5672//
+      SECRET_KEY: ${SECRET_KEY:-dev_secret_key_change_in_production_1234567890}
+      ENVIRONMENT: development
+      LLM_DEFAULT_PROVIDER: ${LLM_DEFAULT_PROVIDER:-mock}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      TTS_DEFAULT_PROVIDER: ${TTS_DEFAULT_PROVIDER:-mock}
+      STORY_BIBLE_RETRIEVAL_ENABLED: ${STORY_BIBLE_RETRIEVAL_ENABLED:-true}
+    volumes:
+      - ./audio_cache:/app/audio_cache
+
+  audio-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: katha_audio_worker
+    restart: unless-stopped
+    command: celery -A app.workers.celery_app.celery_app worker --queues=audio --concurrency=1 --loglevel=info --hostname=audio@%h
+    depends_on:
+      db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://katha:katha_secret@db:5432/katha_studio
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: amqp://${RABBITMQ_USER:-katha}:${RABBITMQ_PASS:-katha_secret}@rabbitmq:5672//
+      SECRET_KEY: ${SECRET_KEY:-dev_secret_key_change_in_production_1234567890}
+      ENVIRONMENT: development
+      ELEVENLABS_API_KEY: ${ELEVENLABS_API_KEY:-}
+      SARVAM_API_KEY: ${SARVAM_API_KEY:-}
+      TTS_DEFAULT_PROVIDER: ${TTS_DEFAULT_PROVIDER:-mock}
 
   frontend:
     build:
@@ -73,4 +145,4 @@ services:
 volumes:
   pgdata:
   redisdata:
-
+  rabbitmqdata:

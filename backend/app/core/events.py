@@ -11,7 +11,7 @@ settings = get_settings()
 
 
 class EventHub:
-    """Hybrid Redis and In-Memory event hub for streaming pipeline progress via SSE."""
+    """Redis Pub/Sub event hub for cross-process SSE delivery."""
 
     def __init__(self) -> None:
         self.subscribers: dict[str, list[asyncio.Queue[str]]] = {}
@@ -19,7 +19,7 @@ class EventHub:
         self._redis_available: bool = False
 
     async def initialize(self) -> None:
-        """Attempt connection to Redis; fall back to in-memory event bus if unavailable."""
+        """Connect to Redis; fall back to in-memory only if unavailable."""
         try:
             self._redis = Redis.from_url(settings.REDIS_URL, decode_responses=True)
             await self._redis.ping()
@@ -36,7 +36,7 @@ class EventHub:
         payload: dict[str, Any],
         node: str | None = None,
     ) -> None:
-        """Publish an event to subscribers of an episode."""
+        """Publish an event to all subscribers of an episode."""
         event_data = {
             "episode_id": episode_id,
             "event_type": event_type,
@@ -46,12 +46,12 @@ class EventHub:
         }
         serialized = json.dumps(event_data)
 
-        # 1. In-memory delivery
+        # In-memory delivery (for same-process subscribers in dev/test)
         if episode_id in self.subscribers:
             for queue in self.subscribers[episode_id]:
                 await queue.put(serialized)
 
-        # 2. Redis delivery if active
+        # Redis Pub/Sub delivery (cross-process — workers publish here)
         if self._redis_available and self._redis:
             try:
                 await self._redis.publish(f"episode:{episode_id}", serialized)
@@ -59,26 +59,57 @@ class EventHub:
                 logger.warning(f"Failed to publish event to Redis: {exc}")
 
     async def subscribe(self, episode_id: str) -> AsyncGenerator[str, None]:
-        """Subscribe to live events for a given episode as an SSE stream."""
-        queue: asyncio.Queue[str] = asyncio.Queue()
-        if episode_id not in self.subscribers:
-            self.subscribers[episode_id] = []
-        self.subscribers[episode_id].append(queue)
+        """Subscribe to episode events as an SSE stream.
 
-        try:
-            while True:
-                msg = await queue.get()
-                yield f"data: {msg}\n\n"
-                parsed = json.loads(msg)
-                # Terminate stream on terminal events
-                if parsed.get("event_type") in ("pipeline_completed", "pipeline_failed"):
-                    break
-        finally:
-            if episode_id in self.subscribers and queue in self.subscribers[episode_id]:
-                self.subscribers[episode_id].remove(queue)
-                if not self.subscribers[episode_id]:
-                    del self.subscribers[episode_id]
+        When Redis is available: uses Redis Pub/Sub (works across processes).
+        When Redis is unavailable: uses in-memory queue (dev/test only).
+        """
+        TERMINAL_EVENTS = frozenset({"pipeline_completed", "pipeline_failed"})
+
+        if self._redis_available and self._redis:
+            # Real Redis Pub/Sub — cross-process safe
+            pubsub = self._redis.pubsub()
+            await pubsub.subscribe(f"episode:{episode_id}")
+            try:
+                async for message in pubsub.listen():
+                    if message["type"] == "message":
+                        data: str = message["data"]
+                        yield f"data: {data}\n\n"
+                        try:
+                            parsed = json.loads(data)
+                            if parsed.get("event_type") in TERMINAL_EVENTS:
+                                break
+                        except json.JSONDecodeError:
+                            pass
+            except Exception as exc:
+                logger.error(f"Redis Pub/Sub stream error for episode {episode_id}: {exc}")
+            finally:
+                try:
+                    await pubsub.unsubscribe(f"episode:{episode_id}")
+                    await pubsub.aclose()
+                except Exception:
+                    pass
+        else:
+            # In-memory fallback — dev/test only (breaks across processes)
+            queue: asyncio.Queue[str] = asyncio.Queue()
+            if episode_id not in self.subscribers:
+                self.subscribers[episode_id] = []
+            self.subscribers[episode_id].append(queue)
+            try:
+                while True:
+                    msg = await queue.get()
+                    yield f"data: {msg}\n\n"
+                    try:
+                        parsed = json.loads(msg)
+                        if parsed.get("event_type") in TERMINAL_EVENTS:
+                            break
+                    except json.JSONDecodeError:
+                        pass
+            finally:
+                if episode_id in self.subscribers and queue in self.subscribers[episode_id]:
+                    self.subscribers[episode_id].remove(queue)
+                    if not self.subscribers[episode_id]:
+                        del self.subscribers[episode_id]
 
 
 event_hub = EventHub()
-

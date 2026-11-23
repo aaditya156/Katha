@@ -20,3 +20,5 @@ redis>=5.0.0
 langgraph-checkpoint-postgres>=2.0.0
 psycopg[binary,pool]>=3.2.0
 pgvector>=0.3.0
+celery[rabbitmq]>=5.3.0
+billiard>=4.2.0

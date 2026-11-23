@@ -57,6 +57,12 @@ class Settings(BaseSettings):
     LANGFUSE_SECRET_KEY: str = ""
     LANGFUSE_HOST: str = "https://cloud.langfuse.com"
 
+    # Celery / RabbitMQ
+    CELERY_BROKER_URL: str = "amqp://katha:katha_secret@localhost:5672//"
+    CELERY_TASK_TIME_LIMIT: int = 600  # 10 min hard limit
+    CELERY_TASK_SOFT_TIME_LIMIT: int = 540  # 9 min soft
+    CELERY_MAX_RETRIES: int = 3
+
     @field_validator("DATABASE_URL")
     @classmethod
     def validate_database_url(cls, v: str) -> str:

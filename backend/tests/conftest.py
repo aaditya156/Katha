@@ -122,3 +122,37 @@ def other_auth_headers(other_user: User) -> dict[str, str]:
     token = create_access_token(subject=other_user.id)
     return {"Authorization": f"Bearer {token}"}
 
+
+@pytest.fixture
+async def test_series(db_session: AsyncSession, test_user: User) -> "Series":
+    """Create a default test series owned by test_user."""
+    from app.models.series import Series
+    series = Series(
+        title="Test Series",
+        logline="A test logline",
+        genre="drama",
+        user_id=test_user.id,
+    )
+    db_session.add(series)
+    await db_session.commit()
+    await db_session.refresh(series)
+    return series
+
+
+@pytest.fixture
+async def test_episode(db_session: AsyncSession, test_series: "Series") -> "Episode":
+    """Create a default test episode in the test series."""
+    from app.models.episode import Episode
+    episode = Episode(
+        series_id=test_series.id,
+        episode_number=1,
+        title="Pilot Episode",
+        premise="A mysterious beginning",
+        script="",
+        outline=None,
+    )
+    db_session.add(episode)
+    await db_session.commit()
+    await db_session.refresh(episode)
+    return episode
+

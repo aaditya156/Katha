@@ -4,6 +4,7 @@ from app.models.series import Series
 from app.models.episode import Episode
 from app.models.story_bible import StoryBibleEntry
 from app.models.evaluation import EvaluationRun, BenchmarkExperiment
+from app.models.job import BackgroundJob
 
 __all__ = [
     "Base",
@@ -13,4 +14,5 @@ __all__ = [
     "StoryBibleEntry",
     "EvaluationRun",
     "BenchmarkExperiment",
+    "BackgroundJob",
 ]
