@@ -1,7 +1,7 @@
 """BackgroundJob model — persistent Celery job tracking. PostgreSQL is source of truth."""
 from datetime import datetime, timezone
 from typing import Any
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, JSON, String, Text, text
 from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import Base, TimestampMixin, UUIDMixin
 
@@ -9,7 +9,15 @@ from app.models.base import Base, TimestampMixin, UUIDMixin
 class BackgroundJob(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "background_jobs"
     __table_args__ = (
-        Index("ix_background_jobs_episode_active", "episode_id", "job_type", "status"),
+        # Partial unique index: at most ONE active (QUEUED, RUNNING, RETRYING) job per episode + job_type
+        Index(
+            "uq_active_generation_job",
+            "episode_id",
+            "job_type",
+            unique=True,
+            postgresql_where=text("status IN ('QUEUED', 'RUNNING', 'RETRYING')"),
+            sqlite_where=text("status IN ('QUEUED', 'RUNNING', 'RETRYING')"),
+        ),
     )
 
     user_id: Mapped[str] = mapped_column(

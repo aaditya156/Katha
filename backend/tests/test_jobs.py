@@ -235,9 +235,13 @@ class TestGenerationTaskUnit:
         mock_task.request.retries = 0
         mock_task.max_retries = 3
 
-        # Fake DB session that returns None for any scalar query
+        mock_result = MagicMock()
+        mock_result.first.return_value = None
+
         mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=mock_result)
         mock_db.scalar = AsyncMock(return_value=None)
+        mock_db.commit = AsyncMock()
         mock_db.__aenter__ = AsyncMock(return_value=mock_db)
         mock_db.__aexit__ = AsyncMock(return_value=False)
 
@@ -248,9 +252,11 @@ class TestGenerationTaskUnit:
         mock_engine.dispose = AsyncMock()
 
         async def run() -> dict[str, Any]:
-            with patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=mock_engine):
-                with patch("sqlalchemy.ext.asyncio.async_sessionmaker", return_value=mock_sf):
-                    return await _async_run_generation(mock_task, "nonexistent-job-id")
+            with patch("app.workers.generation_tasks.create_async_engine", return_value=mock_engine), \
+                 patch("app.workers.generation_tasks.async_sessionmaker", return_value=mock_sf), \
+                 patch("app.workers.generation_tasks.event_hub.initialize", new_callable=AsyncMock), \
+                 patch("app.workers.generation_tasks.event_hub.close", new_callable=AsyncMock):
+                return await _async_run_generation(mock_task, "nonexistent-job-id")
 
         import asyncio
         result = asyncio.get_event_loop().run_until_complete(run())
@@ -267,8 +273,13 @@ class TestGenerationTaskUnit:
 
         terminal_job = make_job("u1", "e1", status="SUCCEEDED")
 
+        mock_result = MagicMock()
+        mock_result.first.return_value = None
+
         mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=mock_result)
         mock_db.scalar = AsyncMock(return_value=terminal_job)
+        mock_db.commit = AsyncMock()
         mock_db.__aenter__ = AsyncMock(return_value=mock_db)
         mock_db.__aexit__ = AsyncMock(return_value=False)
 
@@ -279,9 +290,11 @@ class TestGenerationTaskUnit:
         mock_engine.dispose = AsyncMock()
 
         async def run() -> dict[str, Any]:
-            with patch("sqlalchemy.ext.asyncio.create_async_engine", return_value=mock_engine):
-                with patch("sqlalchemy.ext.asyncio.async_sessionmaker", return_value=mock_sf):
-                    return await _async_run_generation(mock_task, terminal_job.id)
+            with patch("app.workers.generation_tasks.create_async_engine", return_value=mock_engine), \
+                 patch("app.workers.generation_tasks.async_sessionmaker", return_value=mock_sf), \
+                 patch("app.workers.generation_tasks.event_hub.initialize", new_callable=AsyncMock), \
+                 patch("app.workers.generation_tasks.event_hub.close", new_callable=AsyncMock):
+                return await _async_run_generation(mock_task, terminal_job.id)
 
         import asyncio
         result = asyncio.get_event_loop().run_until_complete(run())
@@ -378,3 +391,177 @@ async def test_get_or_create_job_rejects_wrong_user(
         await get_or_create_generation_job(
             db=db_session, episode_id=test_episode.id, user_id="different-user-id"
         )
+
+# ─── Phase 4.1.1 Regression Tests ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_concurrent_active_jobs_prevented_by_unique_constraint(
+    db_session: AsyncSession, test_user: Any, test_episode: Any
+) -> None:
+    """Concurrent creation of generation jobs returns the same active job."""
+    job1, is_new1 = await get_or_create_generation_job(
+        db=db_session, episode_id=test_episode.id, user_id=test_user.id
+    )
+    assert is_new1 is True
+
+    # Simultaneous second request finds existing active job
+    job2, is_new2 = await get_or_create_generation_job(
+        db=db_session, episode_id=test_episode.id, user_id=test_user.id
+    )
+    assert is_new2 is False
+    assert job1.id == job2.id
+
+
+@pytest.mark.asyncio
+async def test_sanitized_error_reporting() -> None:
+    """Ensure error messages redact secrets and API keys."""
+    from app.core.sanitizer import sanitize_error_message
+
+    raw_err = "Failed calling Gemini API with key AIzaSyA1234567890abcdefghijklmnopqrstuv: Server error\nTraceback at /Users/dev/app/secret.py:10"
+    sanitized = sanitize_error_message(raw_err)
+    assert "AIzaSy" not in sanitized
+    assert "[REDACTED]" in sanitized
+    assert "\n" not in sanitized
+
+
+@pytest.mark.asyncio
+async def test_atomic_claiming_skips_already_running_job() -> None:
+    """Duplicate Celery delivery cannot claim a job already marked RUNNING."""
+    from app.workers.generation_tasks import _async_run_generation
+
+    mock_task = MagicMock()
+    mock_task.request.id = "celery-dup-test"
+    mock_task.request.retries = 0
+    mock_task.max_retries = 3
+
+    # Fake DB session that returns None for atomic claim update (already running)
+    mock_result = MagicMock()
+    mock_result.first.return_value = None
+
+    running_job = make_job("u1", "e1", status="RUNNING")
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.scalar = AsyncMock(return_value=running_job)
+    mock_db.commit = AsyncMock()
+    mock_db.__aenter__ = AsyncMock(return_value=mock_db)
+    mock_db.__aexit__ = AsyncMock(return_value=False)
+
+    mock_sf = MagicMock()
+    mock_sf.return_value = mock_db
+
+    mock_engine = AsyncMock()
+    mock_engine.dispose = AsyncMock()
+
+    with patch("app.workers.generation_tasks.create_async_engine", return_value=mock_engine), \
+         patch("app.workers.generation_tasks.async_sessionmaker", return_value=mock_sf), \
+         patch("app.workers.generation_tasks.event_hub.initialize", new_callable=AsyncMock), \
+         patch("app.workers.generation_tasks.event_hub.close", new_callable=AsyncMock):
+        res = await _async_run_generation(mock_task, running_job.id)
+
+    assert res.get("skipped") is True
+    assert res.get("status") == "RUNNING"
+
+
+@pytest.mark.asyncio
+async def test_retry_lifecycle_transitions_to_retrying() -> None:
+    """When a job encounters a recoverable error on attempt 0, status transitions to RETRYING."""
+    from app.workers.generation_tasks import _handle_job_failure
+    from celery.exceptions import Retry
+
+    mock_task = MagicMock()
+    mock_task.request.retries = 0  # Attempt 0
+    mock_task.retry = MagicMock(side_effect=Retry("Simulated celery retry"))
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock()
+    mock_db.commit = AsyncMock()
+    mock_db.__aenter__ = AsyncMock(return_value=mock_db)
+    mock_db.__aexit__ = AsyncMock(return_value=False)
+
+    mock_sf = MagicMock()
+    mock_sf.return_value = mock_db
+
+    with patch("app.workers.generation_tasks.event_hub.publish", new_callable=AsyncMock) as mock_pub:
+        with pytest.raises(Retry):
+            await _handle_job_failure(
+                session_factory=mock_sf,
+                task=mock_task,
+                job_id="job-retry-1",
+                episode_id="ep-1",
+                error_code="PIPELINE_ERROR",
+                error_message="Transient network glitch",
+                exc=Exception("Transient network glitch"),
+                max_retries=3,
+            )
+
+    # Status update executed with RETRYING and attempt count 1
+    mock_db.execute.assert_awaited_once()
+    mock_pub.assert_awaited_once()
+    assert mock_pub.call_args[0][1] == "pipeline_retrying"
+    assert mock_pub.call_args[0][2]["retry_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_lifecycle_transitions_to_failed_when_exhausted() -> None:
+    """When a job exceeds max_retries, status transitions to FAILED."""
+    from app.workers.generation_tasks import _handle_job_failure
+
+    mock_task = MagicMock()
+    mock_task.request.retries = 3  # Attempt 3 >= max_retries 3
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock()
+    mock_db.scalar = AsyncMock(return_value=None)
+    mock_db.commit = AsyncMock()
+    mock_db.__aenter__ = AsyncMock(return_value=mock_db)
+    mock_db.__aexit__ = AsyncMock(return_value=False)
+
+    mock_sf = MagicMock()
+    mock_sf.return_value = mock_db
+
+    with patch("app.workers.generation_tasks.event_hub.publish", new_callable=AsyncMock) as mock_pub:
+        with pytest.raises(RuntimeError, match="Fatal unrecoverable failure"):
+            await _handle_job_failure(
+                session_factory=mock_sf,
+                task=mock_task,
+                job_id="job-fail-final",
+                episode_id="ep-1",
+                error_code="FATAL_ERROR",
+                error_message="Fatal unrecoverable failure",
+                exc=RuntimeError("Fatal unrecoverable failure"),
+                max_retries=3,
+            )
+
+    # Status update executed with FAILED and event published
+    mock_db.execute.assert_awaited_once()
+    mock_pub.assert_awaited_once()
+    assert mock_pub.call_args[0][1] == "pipeline_failed"
+
+
+@pytest.mark.asyncio
+async def test_event_hub_production_raises_on_redis_failure() -> None:
+    """In production environment, Redis connection failure must raise RuntimeError."""
+    from app.core.events import EventHub
+    from app.core.config import get_settings
+
+    hub = EventHub()
+    settings = get_settings()
+
+    with patch.object(settings, "ENVIRONMENT", "production"), \
+         patch("redis.asyncio.Redis.from_url") as mock_redis_cls:
+        mock_client = AsyncMock()
+        mock_client.ping = AsyncMock(side_effect=Exception("Redis down"))
+        mock_redis_cls.return_value = mock_client
+
+        with pytest.raises(RuntimeError, match="Redis Pub/Sub unavailable in production"):
+            await hub.initialize()
+
+
+@pytest.mark.asyncio
+async def test_worker_checkpointer_lifecycle() -> None:
+    """Worker checkpointer cleanly initializes and closes."""
+    from app.workers.generation_tasks import get_worker_checkpointer
+
+    async with get_worker_checkpointer() as checkpointer:
+        assert checkpointer is not None

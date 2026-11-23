@@ -1,27 +1,51 @@
 """
-Celery generation worker: executes LangGraph pipeline in a durable background process.
+Celery generation worker: executes LangGraph pipeline in a durable, retryable background process.
 
-Design:
-- Worker creates its own asyncio event loop, DB engine and checkpointer.
-- Never shares FastAPI's event-loop-bound DB connections or checkpointer.
-- Task args are only serializable IDs — never live objects or sessions.
-- Job state is persisted to PostgreSQL before and after execution.
-- Redis Pub/Sub events are published from the worker process.
+Key Guarantees:
+- Worker-owned event loop and DB connection pool.
+- Worker-owned AsyncPostgresSaver checkpointer with deterministic lifecycle.
+- Initializes EventHub so all LangGraph agents stream cross-process over Redis Pub/Sub.
+- Atomic conditional job claiming: prevents duplicate execution on duplicate Celery delivery.
+- Proper retry lifecycle: RETRYING on intermediate failures, FAILED only when retries exhausted.
+- Measured progress tracking driven by actual LangGraph node transitions.
+- Sanitized error reporting: API keys, secrets, and internal stack traces are redacted.
 """
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import logging
 import uuid
-from datetime import datetime, timezone
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
+from sqlalchemy import select, and_, update
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from app.workers.celery_app import celery_app
 from app.core.config import get_settings
+from app.core.events import event_hub
+from app.core.sanitizer import sanitize_error_message
+from app.models.job import BackgroundJob
+from app.models.episode import Episode
+from app.models.series import Series
+from app.agents.checkpointer import get_in_memory_checkpointer
+from app.agents.graph import create_katha_graph
+from app.agents.state import KathaEpisodeState
+from app.providers.factory import get_llm_provider
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+# Stage and progress mappings for real LangGraph node completions
+NODE_PROGRESS_MAP = {
+    "planner": ("writing", 30),
+    "writer": ("critiquing", 55),
+    "critic": ("localizing", 70),
+    "localizer": ("voice_casting", 85),
+    "voice_caster": ("updating_story_bible", 92),
+    "bible_updater": ("completed", 100),
+}
 
 
 class GenerationTask(Task):
@@ -39,6 +63,44 @@ class GenerationTask(Task):
         return self.get_loop().run_until_complete(coro)
 
 
+@asynccontextmanager
+async def get_worker_checkpointer() -> AsyncGenerator[Any, None]:
+    """Provide a worker-owned checkpointer instance with strict resource cleanup."""
+    if settings.DATABASE_URL.startswith("sqlite"):
+        yield get_in_memory_checkpointer()
+        return
+
+    from psycopg.rows import dict_row
+    from psycopg_pool import AsyncConnectionPool
+    from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+
+    pg_url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+    pool = None
+    try:
+        pool = AsyncConnectionPool(
+            conninfo=pg_url,
+            max_size=5,
+            open=False,
+            kwargs={"autocommit": True, "row_factory": dict_row},
+        )
+        await pool.open()
+        saver = AsyncPostgresSaver(conn=pool)
+        await saver.setup()
+        yield saver
+    except Exception as exc:
+        if settings.ENVIRONMENT == "production":
+            logger.critical(f"Worker failed to initialize durable PostgreSQL checkpointer: {exc}", exc_info=True)
+            raise RuntimeError(f"Failed to initialize durable PostgreSQL checkpointer: {exc}") from exc
+        logger.warning(f"Worker checkpointer falling back to memory in non-production: {exc}")
+        yield get_in_memory_checkpointer()
+    finally:
+        if pool is not None:
+            try:
+                await pool.close()
+            except Exception as exc:
+                logger.warning(f"Error closing worker checkpointer pool: {exc}")
+
+
 @celery_app.task(
     bind=True,
     base=GenerationTask,
@@ -49,100 +111,80 @@ class GenerationTask(Task):
     acks_late=True,
 )
 def run_generation(self: "GenerationTask", job_id: str) -> dict[str, Any]:
-    """Execute LangGraph story generation for a BackgroundJob. Only arg: job_id (str)."""
+    """Execute LangGraph story generation for a BackgroundJob."""
     return self.run_async(_async_run_generation(self, job_id))
 
 
-async def _publish_worker_event(episode_id: str, event_type: str, payload: dict[str, Any]) -> None:
-    """Publish SSE event from worker via Redis Pub/Sub (cross-process safe)."""
-    import json
-    from redis.asyncio import Redis as AsyncRedis
-    event_data = {
-        "episode_id": episode_id,
-        "event_type": event_type,
-        "node": None,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "payload": payload,
-    }
-    try:
-        redis = AsyncRedis.from_url(settings.REDIS_URL, decode_responses=True)
-        await redis.publish(f"episode:{episode_id}", json.dumps(event_data))
-        await redis.aclose()
-    except Exception as exc:
-        logger.warning(f"Worker could not publish event {event_type} to Redis: {exc}")
-
-
-async def _mark_job_failed(
-    job_id: str, error_code: str, error_message: str
-) -> None:
-    """Persist FAILED status in a fresh DB session — safe from error/timeout handlers."""
-    try:
-        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-        from sqlalchemy import select
-        from app.models.job import BackgroundJob
-
-        engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
-        sf = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-        async with sf() as db:
-            job = await db.scalar(select(BackgroundJob).where(BackgroundJob.id == job_id))
-            if job and not job.is_terminal():
-                job.status = "FAILED"
-                job.error_code = error_code
-                job.error_message = error_message[:500]
-                job.finished_at = datetime.now(timezone.utc)
-                job.updated_at = datetime.now(timezone.utc)
-                await db.commit()
-        await engine.dispose()
-    except Exception as e:
-        logger.error(f"Failed to persist job failure for {job_id}: {e}")
-
-
 async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str, Any]:
-    """Async implementation of generation pipeline — runs in worker's own event loop."""
-    from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-    from sqlalchemy import select
-    from app.models.job import BackgroundJob
-    from app.models.episode import Episode
-    from app.models.series import Series
-    from app.agents.checkpointer import get_in_memory_checkpointer
-    from app.agents.graph import create_katha_graph
-    from app.agents.state import KathaEpisodeState
-    from app.providers.factory import get_llm_provider
-
-    # Worker creates its own DB engine — never reuses FastAPI's asyncpg pool
+    """Async worker execution with atomic claiming, real checkpointing, and Redis SSE."""
     engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     episode_id = "unknown"
+    max_retries = 3
+
+    # Initialize EventHub inside worker process so all LangGraph nodes stream via Redis
+    await event_hub.initialize()
+
     try:
-        # 1. Load job
+        # 1. ATOMIC CLAIM: Only claim if status is QUEUED or RETRYING
+        # Prevents duplicate task execution on redeliveries or concurrent worker claims
+        now = datetime.now(timezone.utc)
+        claim_stmt = (
+            update(BackgroundJob)
+            .where(
+                and_(
+                    BackgroundJob.id == job_id,
+                    BackgroundJob.status.in_(["QUEUED", "RETRYING"]),
+                )
+            )
+            .values(
+                status="RUNNING",
+                celery_task_id=task.request.id or str(uuid.uuid4()),
+                started_at=now,
+                current_stage="initializing",
+                progress=5,
+                dispatch_pending=0,
+                updated_at=now,
+            )
+            .returning(
+                BackgroundJob.id,
+                BackgroundJob.episode_id,
+                BackgroundJob.user_id,
+                BackgroundJob.metadata_json,
+                BackgroundJob.retry_count,
+                BackgroundJob.max_retries,
+            )
+        )
+
         async with session_factory() as db:
-            job = await db.scalar(select(BackgroundJob).where(BackgroundJob.id == job_id))
-            if not job:
-                logger.error(f"BackgroundJob {job_id} not found.")
-                await engine.dispose()
-                return {"status": "NOT_FOUND", "job_id": job_id}
-
-            if job.is_terminal():
-                logger.info(f"Job {job_id} already terminal ({job.status}) — skipping.")
-                await engine.dispose()
-                return {"status": job.status, "job_id": job_id, "episode_id": job.episode_id}
-
-            episode_id = job.episode_id
-            meta = job.metadata_json or {}
-
-            # 2. Mark RUNNING
-            job.status = "RUNNING"
-            job.celery_task_id = task.request.id or str(uuid.uuid4())
-            job.started_at = datetime.now(timezone.utc)
-            job.current_stage = "initializing"
-            job.dispatch_pending = 0
-            job.updated_at = datetime.now(timezone.utc)
+            result = await db.execute(claim_stmt)
+            claimed = result.first()
             await db.commit()
 
-        await _publish_worker_event(episode_id, "pipeline_started", {"job_id": job_id})
+        if not claimed:
+            # Check existing state to log accurately
+            async with session_factory() as db:
+                existing = await db.scalar(select(BackgroundJob).where(BackgroundJob.id == job_id))
+            if existing:
+                logger.info(
+                    f"Job {job_id} not claimable (status={existing.status}). "
+                    "Skipping duplicate or terminal task execution."
+                )
+                return {"status": existing.status, "job_id": job_id, "skipped": True}
+            logger.error(f"BackgroundJob {job_id} not found.")
+            return {"status": "NOT_FOUND", "job_id": job_id}
 
-        # 3. Load episode + series
+        _, episode_id, user_id, meta_json, retry_count, max_retries = claimed
+        meta = meta_json or {}
+
+        await event_hub.publish(
+            episode_id,
+            "pipeline_started",
+            {"job_id": job_id, "attempt": task.request.retries + 1},
+        )
+
+        # 2. Fetch Episode & Series metadata
         async with session_factory() as db:
             episode = await db.scalar(select(Episode).where(Episode.id == episode_id))
             if not episode:
@@ -154,7 +196,6 @@ async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str
             episode.status = "WRITING"
             await db.commit()
 
-            # Capture plain values before session closes
             ep_number = episode.episode_number
             ep_premise = episode.premise
             ep_target_lang = episode.target_language
@@ -163,22 +204,13 @@ async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str
             series_id = series.id
             series_genre = series.genre
 
-        # 4. Update progress
-        async with session_factory() as db:
-            job2 = await db.scalar(select(BackgroundJob).where(BackgroundJob.id == job_id))
-            if job2:
-                job2.current_stage = "generating"
-                job2.progress = 20
-                job2.updated_at = datetime.now(timezone.utc)
-                await db.commit()
-
-        # 5. Build LLM provider from config
+        # 3. Build LLM provider from config
         provider_id = meta.get("provider", settings.LLM_DEFAULT_PROVIDER)
         model_name = meta.get("model_name")
         exec_mode = "MOCK" if provider_id == "mock" else "LIVE"
         llm = get_llm_provider(provider_id, model_name, exec_mode)
 
-        # 6. Build initial state
+        # 4. Prepare initial state
         initial_state: KathaEpisodeState = {
             "series_id": series_id,
             "episode_id": episode_id,
@@ -203,58 +235,173 @@ async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str
             except Exception:
                 pass
 
-        # 7. Use in-memory checkpointer in workers
-        # (PostgreSQL checkpointer uses asyncpg which requires app startup; MemorySaver is safe)
-        checkpointer = get_in_memory_checkpointer()
-        graph = create_katha_graph(llm=llm, checkpointer=checkpointer)
         config = {"configurable": {"thread_id": episode_id}}
 
-        await _publish_worker_event(episode_id, "node_started", {"node": "planner", "job_id": job_id})
+        # 5. Execute LangGraph with worker-owned checkpointer & real progress updates
+        async with get_worker_checkpointer() as checkpointer:
+            graph = create_katha_graph(llm=llm, checkpointer=checkpointer)
 
-        # 8. Execute LangGraph pipeline
-        final_state = await graph.ainvoke(initial_state, config=config)
+            # Check if this thread has an existing checkpoint (resumption path)
+            existing_checkpoint = await checkpointer.aget_tuple(config)
+            start_input = None if (existing_checkpoint and existing_checkpoint.checkpoint) else initial_state
 
-        # 9. Persist results
+            # Stream updates node by node to measure true progress
+            async for update_chunk in graph.astream(start_input, config=config, stream_mode="updates"):
+                for node_name in update_chunk.keys():
+                    if node_name in NODE_PROGRESS_MAP:
+                        stage, prog = NODE_PROGRESS_MAP[node_name]
+                        async with session_factory() as db:
+                            await db.execute(
+                                update(BackgroundJob)
+                                .where(BackgroundJob.id == job_id)
+                                .values(
+                                    current_stage=stage,
+                                    progress=prog,
+                                    updated_at=datetime.now(timezone.utc),
+                                )
+                            )
+                            await db.commit()
+
+            # Retrieve final state from durable checkpoint
+            final_snapshot = await graph.aget_state(config)
+            final_state = final_snapshot.values
+
+        # 6. Check workflow outcome and persist
+        is_completed = final_state.get("status") == "COMPLETED"
+
         async with session_factory() as db:
-            ep2 = await db.scalar(select(Episode).where(Episode.id == episode_id))
-            if ep2:
+            ep = await db.scalar(select(Episode).where(Episode.id == episode_id))
+            if ep:
                 if final_state.get("outline"):
-                    ep2.outline = final_state["outline"].model_dump()
+                    ep.outline = final_state["outline"].model_dump()
                 if final_state.get("cast_script"):
-                    ep2.script = final_state["cast_script"].model_dump()
-                ep2.status = "READY" if final_state.get("status") == "COMPLETED" else "FAILED"
+                    ep.script = final_state["cast_script"].model_dump()
+                ep.status = "READY" if is_completed else "FAILED"
                 await db.commit()
 
-            job3 = await db.scalar(select(BackgroundJob).where(BackgroundJob.id == job_id))
-            if job3:
-                final_status = "SUCCEEDED" if final_state.get("status") == "COMPLETED" else "FAILED"
-                job3.status = final_status
-                job3.progress = 100
-                job3.current_stage = "completed"
-                job3.finished_at = datetime.now(timezone.utc)
-                job3.updated_at = datetime.now(timezone.utc)
-                await db.commit()
+            final_job_status = "SUCCEEDED" if is_completed else "FAILED"
+            now_finish = datetime.now(timezone.utc)
+            await db.execute(
+                update(BackgroundJob)
+                .where(BackgroundJob.id == job_id)
+                .values(
+                    status=final_job_status,
+                    progress=100 if is_completed else 95,
+                    current_stage="completed" if is_completed else "failed",
+                    finished_at=now_finish,
+                    updated_at=now_finish,
+                )
+            )
+            await db.commit()
 
-        await _publish_worker_event(
-            episode_id, "pipeline_completed",
-            {"job_id": job_id, "status": final_state.get("status")}
+        if is_completed:
+            await event_hub.publish(
+                episode_id,
+                "pipeline_completed",
+                {"job_id": job_id, "status": "COMPLETED"},
+            )
+            return {"status": "SUCCEEDED", "job_id": job_id, "episode_id": episode_id}
+        else:
+            raise RuntimeError(f"Pipeline finished with uncompleted status: {final_state.get('status')}")
+
+    except SoftTimeLimitExceeded as exc:
+        safe_msg = sanitize_error_message("Task execution soft time limit exceeded.")
+        logger.error(f"Job {job_id} soft time limit exceeded: {safe_msg}")
+        await _handle_job_failure(
+            session_factory=session_factory,
+            task=task,
+            job_id=job_id,
+            episode_id=episode_id,
+            error_code="TIMEOUT",
+            error_message=safe_msg,
+            exc=exc,
+            max_retries=max_retries,
         )
-        await engine.dispose()
-        return {"status": "SUCCEEDED", "job_id": job_id, "episode_id": episode_id}
-
-    except SoftTimeLimitExceeded:
-        logger.error(f"Job {job_id} soft time limit exceeded.")
-        await _mark_job_failed(job_id, "TIMEOUT", "Task exceeded time limit.")
-        await engine.dispose()
         raise
 
     except Exception as exc:
-        logger.error(f"Generation job {job_id} failed: {exc}", exc_info=True)
-        await _mark_job_failed(job_id, "PIPELINE_ERROR", str(exc))
-        await _publish_worker_event(episode_id, "pipeline_failed", {"error": str(exc)[:200], "job_id": job_id})
+        safe_msg = sanitize_error_message(exc)
+        logger.error(f"Generation job {job_id} encountered error: {safe_msg}", exc_info=True)
+        await _handle_job_failure(
+            session_factory=session_factory,
+            task=task,
+            job_id=job_id,
+            episode_id=episode_id,
+            error_code="PIPELINE_ERROR",
+            error_message=safe_msg,
+            exc=exc,
+            max_retries=max_retries,
+        )
+
+    finally:
+        await event_hub.close()
         await engine.dispose()
 
-        retry_num = task.request.retries
-        if retry_num < (task.max_retries or 3):
-            raise task.retry(exc=exc, countdown=30 * (2 ** retry_num))
-        raise
+
+async def _handle_job_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    task: "GenerationTask",
+    job_id: str,
+    episode_id: str,
+    error_code: str,
+    error_message: str,
+    exc: Exception,
+    max_retries: int,
+) -> None:
+    """Correct Celery retry lifecycle: RETRYING on intermediate, FAILED on exhausted."""
+    current_retry = task.request.retries
+    now = datetime.now(timezone.utc)
+
+    if current_retry < max_retries:
+        # RETRYABLE: Update job to RETRYING and persist attempt count + sanitized error
+        next_attempt = current_retry + 1
+        async with session_factory() as db:
+            await db.execute(
+                update(BackgroundJob)
+                .where(BackgroundJob.id == job_id)
+                .values(
+                    status="RETRYING",
+                    retry_count=next_attempt,
+                    error_code=error_code,
+                    error_message=error_message,
+                    updated_at=now,
+                )
+            )
+            await db.commit()
+
+        await event_hub.publish(
+            episode_id,
+            "pipeline_retrying",
+            {"job_id": job_id, "retry_count": next_attempt, "error": error_message},
+        )
+
+        countdown = min(30 * (2 ** current_retry), 300)
+        logger.info(f"Retrying job {job_id} (attempt {next_attempt}/{max_retries}) in {countdown}s.")
+        raise task.retry(exc=exc, countdown=countdown)
+
+    else:
+        # EXHAUSTED: Final terminal FAILED status
+        async with session_factory() as db:
+            await db.execute(
+                update(BackgroundJob)
+                .where(BackgroundJob.id == job_id)
+                .values(
+                    status="FAILED",
+                    retry_count=current_retry,
+                    error_code="RETRIES_EXHAUSTED",
+                    error_message=f"Exhausted {max_retries} retries: {error_message}",
+                    finished_at=now,
+                    updated_at=now,
+                )
+            )
+            ep = await db.scalar(select(Episode).where(Episode.id == episode_id))
+            if ep:
+                ep.status = "FAILED"
+            await db.commit()
+
+        await event_hub.publish(
+            episode_id,
+            "pipeline_failed",
+            {"job_id": job_id, "error": error_message},
+        )
+        raise exc

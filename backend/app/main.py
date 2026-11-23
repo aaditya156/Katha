@@ -134,10 +134,14 @@ async def generic_exception_handler(request: Request, exc: Exception) -> JSONRes
 
 @app.get("/health", tags=["Health"])
 async def health_check() -> dict[str, str]:
+    from app.core.events import event_hub
+    redis_status = "connected" if event_hub._redis_available else ("in-memory" if settings.ENVIRONMENT != "production" else "unhealthy")
+    is_healthy = settings.ENVIRONMENT != "production" or event_hub._redis_available
     return {
-        "status": "healthy",
+        "status": "healthy" if is_healthy else "degraded",
         "service": settings.PROJECT_NAME,
         "environment": settings.ENVIRONMENT,
+        "redis": redis_status,
     }
 
 
