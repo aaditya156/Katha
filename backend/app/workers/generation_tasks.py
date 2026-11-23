@@ -19,7 +19,7 @@ from typing import Any, AsyncGenerator
 
 from celery import Task
 from celery.exceptions import SoftTimeLimitExceeded
-from sqlalchemy import select, and_, update
+from sqlalchemy import select, and_, or_, update
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 
 from app.workers.celery_app import celery_app
@@ -88,11 +88,8 @@ async def get_worker_checkpointer() -> AsyncGenerator[Any, None]:
         await saver.setup()
         yield saver
     except Exception as exc:
-        if settings.ENVIRONMENT == "production":
-            logger.critical(f"Worker failed to initialize durable PostgreSQL checkpointer: {exc}", exc_info=True)
-            raise RuntimeError(f"Failed to initialize durable PostgreSQL checkpointer: {exc}") from exc
-        logger.warning(f"Worker checkpointer falling back to memory in non-production: {exc}")
-        yield get_in_memory_checkpointer()
+        logger.critical(f"Worker failed to initialize durable PostgreSQL checkpointer: {exc}", exc_info=True)
+        raise RuntimeError(f"Failed to initialize durable PostgreSQL checkpointer: {exc}") from exc
     finally:
         if pool is not None:
             try:
@@ -117,25 +114,31 @@ def run_generation(self: "GenerationTask", job_id: str) -> dict[str, Any]:
 
 async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str, Any]:
     """Async worker execution with atomic claiming, real checkpointing, and Redis SSE."""
-    engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
-    session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
+    engine = None
+    session_factory = None
     episode_id = "unknown"
     max_retries = 3
 
-    # Initialize EventHub inside worker process so all LangGraph nodes stream via Redis
-    await event_hub.initialize()
-
     try:
-        # 1. ATOMIC CLAIM: Only claim if status is QUEUED or RETRYING
-        # Prevents duplicate task execution on redeliveries or concurrent worker claims
+        engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
+        session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+        # Initialize EventHub inside worker process so all LangGraph nodes stream via Redis
+        await event_hub.initialize()
+
+        # 1. ATOMIC CLAIM: Validate expected attempt against persisted retry_count
+        # Prevents stale or duplicate deliveries from earlier attempts from claiming newer RETRYING jobs
         now = datetime.now(timezone.utc)
+        current_attempt = task.request.retries
         claim_stmt = (
             update(BackgroundJob)
             .where(
                 and_(
                     BackgroundJob.id == job_id,
-                    BackgroundJob.status.in_(["QUEUED", "RETRYING"]),
+                    or_(
+                        and_(BackgroundJob.status == "QUEUED", BackgroundJob.retry_count == 0),
+                        and_(BackgroundJob.status == "RETRYING", BackgroundJob.retry_count == current_attempt),
+                    ),
                 )
             )
             .values(
@@ -168,8 +171,8 @@ async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str
                 existing = await db.scalar(select(BackgroundJob).where(BackgroundJob.id == job_id))
             if existing:
                 logger.info(
-                    f"Job {job_id} not claimable (status={existing.status}). "
-                    "Skipping duplicate or terminal task execution."
+                    f"Job {job_id} not claimable (status={existing.status}, retry_count={existing.retry_count}, task_retries={current_attempt}). "
+                    "Skipping duplicate, stale or terminal task execution."
                 )
                 return {"status": existing.status, "job_id": job_id, "skipped": True}
             logger.error(f"BackgroundJob {job_id} not found.")
@@ -178,11 +181,14 @@ async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str
         _, episode_id, user_id, meta_json, retry_count, max_retries = claimed
         meta = meta_json or {}
 
-        await event_hub.publish(
-            episode_id,
-            "pipeline_started",
-            {"job_id": job_id, "attempt": task.request.retries + 1},
-        )
+        try:
+            await event_hub.publish(
+                episode_id,
+                "pipeline_started",
+                {"job_id": job_id, "attempt": task.request.retries + 1},
+            )
+        except Exception as pub_exc:
+            logger.warning(f"Could not publish pipeline_started event: {pub_exc}")
 
         # 2. Fetch Episode & Series metadata
         async with session_factory() as db:
@@ -235,7 +241,7 @@ async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str
             except Exception:
                 pass
 
-        config = {"configurable": {"thread_id": episode_id}}
+        config = {"configurable": {"thread_id": job_id}}
 
         # 5. Execute LangGraph with worker-owned checkpointer & real progress updates
         async with get_worker_checkpointer() as checkpointer:
@@ -335,11 +341,12 @@ async def _async_run_generation(task: "GenerationTask", job_id: str) -> dict[str
 
     finally:
         await event_hub.close()
-        await engine.dispose()
+        if engine is not None:
+            await engine.dispose()
 
 
 async def _handle_job_failure(
-    session_factory: async_sessionmaker[AsyncSession],
+    session_factory: async_sessionmaker[AsyncSession] | None,
     task: "GenerationTask",
     job_id: str,
     episode_id: str,
@@ -348,60 +355,83 @@ async def _handle_job_failure(
     exc: Exception,
     max_retries: int,
 ) -> None:
-    """Correct Celery retry lifecycle: RETRYING on intermediate, FAILED on exhausted."""
+    """Correct Celery retry lifecycle: RETRYING on intermediate, FAILED on exhausted.
+    Decoupled from Redis event delivery so telemetry issues never suppress retries.
+    """
     current_retry = task.request.retries
     now = datetime.now(timezone.utc)
 
-    if current_retry < max_retries:
-        # RETRYABLE: Update job to RETRYING and persist attempt count + sanitized error
-        next_attempt = current_retry + 1
-        async with session_factory() as db:
-            await db.execute(
-                update(BackgroundJob)
-                .where(BackgroundJob.id == job_id)
-                .values(
-                    status="RETRYING",
-                    retry_count=next_attempt,
-                    error_code=error_code,
-                    error_message=error_message,
-                    updated_at=now,
+    # Ensure we have a working session factory to persist status
+    temp_engine = None
+    sf = session_factory
+    if sf is None:
+        temp_engine = create_async_engine(settings.DATABASE_URL, pool_pre_ping=True)
+        sf = async_sessionmaker(temp_engine, class_=AsyncSession, expire_on_commit=False)
+
+    try:
+        if current_retry < max_retries:
+            # 1. RETRYABLE: Update job to RETRYING and persist attempt count + sanitized error first
+            next_attempt = current_retry + 1
+            async with sf() as db:
+                await db.execute(
+                    update(BackgroundJob)
+                    .where(BackgroundJob.id == job_id)
+                    .values(
+                        status="RETRYING",
+                        retry_count=next_attempt,
+                        error_code=error_code,
+                        error_message=error_message,
+                        updated_at=now,
+                    )
                 )
-            )
-            await db.commit()
+                await db.commit()
 
-        await event_hub.publish(
-            episode_id,
-            "pipeline_retrying",
-            {"job_id": job_id, "retry_count": next_attempt, "error": error_message},
-        )
-
-        countdown = min(30 * (2 ** current_retry), 300)
-        logger.info(f"Retrying job {job_id} (attempt {next_attempt}/{max_retries}) in {countdown}s.")
-        raise task.retry(exc=exc, countdown=countdown)
-
-    else:
-        # EXHAUSTED: Final terminal FAILED status
-        async with session_factory() as db:
-            await db.execute(
-                update(BackgroundJob)
-                .where(BackgroundJob.id == job_id)
-                .values(
-                    status="FAILED",
-                    retry_count=current_retry,
-                    error_code="RETRIES_EXHAUSTED",
-                    error_message=f"Exhausted {max_retries} retries: {error_message}",
-                    finished_at=now,
-                    updated_at=now,
+            # 2. Best-effort event publishing — telemetry failure must NEVER suppress task.retry()
+            try:
+                await event_hub.publish(
+                    episode_id,
+                    "pipeline_retrying",
+                    {"job_id": job_id, "retry_count": next_attempt, "error": error_message},
                 )
-            )
-            ep = await db.scalar(select(Episode).where(Episode.id == episode_id))
-            if ep:
-                ep.status = "FAILED"
-            await db.commit()
+            except Exception as pub_exc:
+                logger.warning(f"Failed to publish pipeline_retrying event: {pub_exc}")
 
-        await event_hub.publish(
-            episode_id,
-            "pipeline_failed",
-            {"job_id": job_id, "error": error_message},
-        )
-        raise exc
+            countdown = min(30 * (2 ** current_retry), 300)
+            logger.info(f"Retrying job {job_id} (attempt {next_attempt}/{max_retries}) in {countdown}s.")
+            raise task.retry(exc=exc, countdown=countdown)
+
+        else:
+            # 3. EXHAUSTED: Final terminal FAILED status
+            async with sf() as db:
+                await db.execute(
+                    update(BackgroundJob)
+                    .where(BackgroundJob.id == job_id)
+                    .values(
+                        status="FAILED",
+                        retry_count=current_retry,
+                        error_code="RETRIES_EXHAUSTED",
+                        error_message=f"Exhausted {max_retries} retries: {error_message}",
+                        finished_at=now,
+                        updated_at=now,
+                    )
+                )
+                if episode_id != "unknown":
+                    ep = await db.scalar(select(Episode).where(Episode.id == episode_id))
+                    if ep:
+                        ep.status = "FAILED"
+                await db.commit()
+
+            # 4. Best-effort event publishing
+            try:
+                await event_hub.publish(
+                    episode_id,
+                    "pipeline_failed",
+                    {"job_id": job_id, "error": error_message},
+                )
+            except Exception as pub_exc:
+                logger.warning(f"Failed to publish pipeline_failed event: {pub_exc}")
+
+            raise exc
+    finally:
+        if temp_engine is not None:
+            await temp_engine.dispose()

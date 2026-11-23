@@ -565,3 +565,163 @@ async def test_worker_checkpointer_lifecycle() -> None:
 
     async with get_worker_checkpointer() as checkpointer:
         assert checkpointer is not None
+
+# ─── Phase 4.1.2 Tests ────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_checkpoint_isolation_between_jobs() -> None:
+    """Validate that LangGraph checkpoint thread_id is job_id, isolating different jobs for the same episode."""
+    from langgraph.checkpoint.memory import MemorySaver
+    from app.agents.graph import create_katha_graph
+    from app.agents.state import KathaEpisodeState
+    from app.providers.mock import MockLLMProvider
+
+    checkpointer = MemorySaver()
+    llm = MockLLMProvider()
+    graph = create_katha_graph(llm=llm, checkpointer=checkpointer)
+
+    episode_id = "ep-shared-isolation"
+    job_1_id = "job-run-1"
+    job_2_id = "job-run-2"
+
+    config_job_1 = {"configurable": {"thread_id": job_1_id}}
+    config_job_2 = {"configurable": {"thread_id": job_2_id}}
+
+    initial_state_1: KathaEpisodeState = {
+        "series_id": "series-1",
+        "episode_id": episode_id,
+        "episode_number": 1,
+        "premise": "First job execution",
+        "target_language": "hinglish",
+        "target_duration_minutes": 5,
+        "genre": "drama",
+        "characters_hint": [],
+        "revision_count": 0,
+        "critique_history": [],
+        "errors": [],
+        "failing_scenes": [],
+        "status": "INITIALIZED",
+        "current_node": "start",
+        "simulation_flags": {},
+    }
+
+    # Job 1 executes and completes
+    res_1 = await graph.ainvoke(initial_state_1, config=config_job_1)
+    assert res_1["status"] == "COMPLETED"
+
+    # Checkpoint 1 exists
+    checkpoint_1 = await checkpointer.aget_tuple(config_job_1)
+    assert checkpoint_1 is not None
+
+    # Job 2 for the same episode starts fresh — its thread_id has no checkpoint
+    checkpoint_2 = await checkpointer.aget_tuple(config_job_2)
+    assert checkpoint_2 is None
+
+    # Job 1 retry with same job_id DOES find checkpoint_1
+    retry_checkpoint = await checkpointer.aget_tuple(config_job_1)
+    assert retry_checkpoint is not None
+
+
+@pytest.mark.asyncio
+async def test_postgres_checkpointer_failure_raises_visibly() -> None:
+    """When PostgreSQL is configured and pool fails to initialize, RuntimeError must be raised."""
+    from app.workers.generation_tasks import get_worker_checkpointer
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    with patch.object(settings, "DATABASE_URL", "postgresql+asyncpg://katha:secret@db:5432/test"), \
+         patch("psycopg_pool.AsyncConnectionPool.open", side_effect=Exception("Database unreachable")):
+        with pytest.raises(RuntimeError, match="Failed to initialize durable PostgreSQL checkpointer"):
+            async with get_worker_checkpointer():
+                pass
+
+
+@pytest.mark.asyncio
+async def test_sqlite_checkpointer_permits_memory_saver() -> None:
+    """In SQLite environment, MemorySaver is permitted and yields cleanly."""
+    from app.workers.generation_tasks import get_worker_checkpointer
+    from app.core.config import get_settings
+    from langgraph.checkpoint.memory import MemorySaver
+
+    settings = get_settings()
+    with patch.object(settings, "DATABASE_URL", "sqlite+aiosqlite:///:memory:"):
+        async with get_worker_checkpointer() as checkpointer:
+            assert isinstance(checkpointer, MemorySaver)
+
+
+@pytest.mark.asyncio
+async def test_decoupled_retry_from_redis_event_failure() -> None:
+    """When Redis event delivery fails during retry handling, task.retry must still be called."""
+    from app.workers.generation_tasks import _handle_job_failure
+    from celery.exceptions import Retry
+
+    mock_task = MagicMock()
+    mock_task.request.retries = 0
+    mock_task.retry = MagicMock(side_effect=Retry("Simulated celery retry"))
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock()
+    mock_db.commit = AsyncMock()
+    mock_db.__aenter__ = AsyncMock(return_value=mock_db)
+    mock_db.__aexit__ = AsyncMock(return_value=False)
+
+    mock_sf = MagicMock()
+    mock_sf.return_value = mock_db
+
+    # Event publishing raises error (e.g. Redis network disconnect)
+    with patch("app.workers.generation_tasks.event_hub.publish", side_effect=Exception("Redis connection lost")):
+        with pytest.raises(Retry):
+            await _handle_job_failure(
+                session_factory=mock_sf,
+                task=mock_task,
+                job_id="job-decouple-test",
+                episode_id="ep-1",
+                error_code="PIPELINE_ERROR",
+                error_message="Network glitch",
+                exc=Exception("Network glitch"),
+                max_retries=3,
+            )
+
+    # Celery retry was successfully invoked despite Redis failure
+    mock_task.retry.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_stale_retry_claim_rejected() -> None:
+    """A stale delivery from an earlier retry attempt must not claim a newer RETRYING job."""
+    from app.workers.generation_tasks import _async_run_generation
+
+    # Task delivery has retries = 1 (stale delivery from attempt 1)
+    mock_task = MagicMock()
+    mock_task.request.id = "celery-stale-task"
+    mock_task.request.retries = 1
+    mock_task.max_retries = 3
+
+    # But job in DB has already progressed to retry_count = 2 (attempt 2)
+    current_job_in_db = make_job("u1", "e1", status="RETRYING")
+    current_job_in_db.retry_count = 2
+
+    mock_result = MagicMock()
+    mock_result.first.return_value = None  # DB atomic conditional update rejects stale claim
+
+    mock_db = AsyncMock()
+    mock_db.execute = AsyncMock(return_value=mock_result)
+    mock_db.scalar = AsyncMock(return_value=current_job_in_db)
+    mock_db.commit = AsyncMock()
+    mock_db.__aenter__ = AsyncMock(return_value=mock_db)
+    mock_db.__aexit__ = AsyncMock(return_value=False)
+
+    mock_sf = MagicMock()
+    mock_sf.return_value = mock_db
+
+    mock_engine = AsyncMock()
+    mock_engine.dispose = AsyncMock()
+
+    with patch("app.workers.generation_tasks.create_async_engine", return_value=mock_engine), \
+         patch("app.workers.generation_tasks.async_sessionmaker", return_value=mock_sf), \
+         patch("app.workers.generation_tasks.event_hub.initialize", new_callable=AsyncMock), \
+         patch("app.workers.generation_tasks.event_hub.close", new_callable=AsyncMock):
+        res = await _async_run_generation(mock_task, current_job_in_db.id)
+
+    assert res.get("skipped") is True
+    assert res.get("status") == "RETRYING"
